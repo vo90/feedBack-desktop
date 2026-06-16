@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Clone core at active branch
         env:
-          GH_CLONE_TOKEN: ${{ secrets.SLOPSMITH_SYNC_TOKEN }}
+          GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
         run: |
           git clone --depth 1 --branch "${{ needs.setup.outputs.branch }}" \
             "https://x-access-token:${GH_CLONE_TOKEN}@github.com/got-feedback/feedback.git" core
@@ -149,7 +149,7 @@ jobs:
         env:
           # PAT with read access to the private got-feedback repos so
           # build-common.sh can clone core + the bundled plugins.
-          GH_CLONE_TOKEN: ${{ secrets.SLOPSMITH_SYNC_TOKEN }}
+          GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # No notarization for nightlies — testers use xattr -dr com.apple.quarantine
           CSC_FOR_PULL_REQUEST: "true"

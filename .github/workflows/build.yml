@@ -149,7 +149,7 @@ jobs:
           SLOPSMITH_REF: ${{ inputs.slopsmith_ref || 'main' }}
           # PAT with read access to the private got-feedback repos so
           # build-common.sh can clone core + the bundled plugins.
-          GH_CLONE_TOKEN: ${{ secrets.SLOPSMITH_SYNC_TOKEN }}
+          GH_CLONE_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -538,7 +538,7 @@ jobs:
           make_latest: ${{ (contains(github.ref_name, '-alpha.') || contains(github.ref_name, '-beta.') || contains(github.ref_name, '-rc.')) && 'false' || 'true' }}
 
   # Mirror release version to slopsmith core
-  # Requires SLOPSMITH_SYNC_TOKEN secret
+  # Requires FEEDBACK_CLONE_TOKEN secret
   notify-slopsmith:
     needs: release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -548,7 +548,7 @@ jobs:
     steps:
       - name: Dispatch VERSION sync to slopsmith
         env:
-          GH_TOKEN: ${{ secrets.SLOPSMITH_SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.FEEDBACK_CLONE_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           version="${REF_NAME#v}"
@@ -557,7 +557,7 @@ jobs:
             exit 0
           fi
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::SLOPSMITH_SYNC_TOKEN secret is missing; cannot dispatch."
+            echo "::error::FEEDBACK_CLONE_TOKEN secret is missing; cannot dispatch."
             exit 1
           fi
           gh api -X POST repos/got-feedback/feedback/dispatches \
