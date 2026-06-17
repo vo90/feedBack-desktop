@@ -493,7 +493,7 @@ const slopsmithDesktopApi = {
     // Keep the OS display/screensaver awake while a song plays. slopsmith core
     // app.js calls setScreenAwake(true) on play and (false) on pause/stop;
     // embedded Chromium ignores the renderer's navigator.wakeLock, so the main
-    // process drives powerSaveBlocker instead (slopsmith/slopsmith#686).
+    // process drives powerSaveBlocker instead (got-feedback/feedback#686).
     power: {
         setScreenAwake: (keep: boolean) => ipcRenderer.invoke(IPC_POWER_SET_SCREEN_AWAKE, keep),
     },

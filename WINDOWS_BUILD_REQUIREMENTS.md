@@ -40,7 +40,7 @@ The Windows build uses Python's embeddable distribution, which has a special con
    ```
 
 ### Git authentication for private plugins
-If your build pulls private plugin repos (e.g. `byrongamatos/slopsmith-plugin-cf`), make sure git can authenticate non-interactively before running the build — Git Credential Manager + a PAT or SSH key both work. The build uses `git clone --depth 1` for every plugin and does NOT call the GitHub CLI.
+If your build pulls private plugin repos (e.g. `got-feedback/feedback-plugin-cf`), make sure git can authenticate non-interactively before running the build — Git Credential Manager + a PAT or SSH key both work. The build uses `git clone --depth 1` for every plugin and does NOT call the GitHub CLI.
 
 ## Quick Start
 

@@ -1039,7 +1039,7 @@ async function startup(): Promise<void> {
     ipcMain.handle(IPC_UPDATE_CHECK_NOW, () => updateManager.checkNow());
     ipcMain.handle(IPC_UPDATE_APPLY, () => updateManager.applyAndRestart());
 
-    // Keep the display awake while a song plays (slopsmith/slopsmith#686). The
+    // Keep the display awake while a song plays (got-feedback/feedback#686). The
     // renderer toggles this via window.slopsmithDesktop.power.setScreenAwake on
     // play/pause; the single OS blocker is refcounted across renderers below.
     ipcMain.handle(IPC_POWER_SET_SCREEN_AWAKE, (event, keep: unknown) => {
@@ -1107,7 +1107,7 @@ app.on('before-quit', () => {
     shutdown();
 });
 
-// Screen wake lock (slopsmith/slopsmith#686). The single OS powerSaveBlocker is
+// Screen wake lock (got-feedback/feedback#686). The single OS powerSaveBlocker is
 // held while at least one renderer wants the screen awake (a song is playing in
 // it). Renderers are refcounted in a set so a multi-window setup (the main
 // window plus a same-origin popout) stays correct — one window pausing must not
