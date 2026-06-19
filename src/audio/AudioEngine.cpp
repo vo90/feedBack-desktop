@@ -1301,6 +1301,14 @@ bool AudioEngine::loadBackingTrack(const juce::File& file)
     cachedBackingDuration.store(backingTransport->getLengthInSeconds());
     cachedBackingPosition.store(0.0);
     backingHeardPositionSec.store(0.0, std::memory_order_relaxed);
+
+    // Reset the loudness leveler for the new song: clearing the cached sample
+    // rate forces renderBackingBlockLocked() to re-prepare() it on the next
+    // block, dropping the previous track's AGC gain + limiter state. Otherwise
+    // the ~300 ms gain follower would carry over and briefly mis-level the start
+    // of a much louder/quieter next song. Safe here — loadBackingTrack holds
+    // backingLock, the same lock the render path runs under.
+    backingLevelerSr = 0.0;
     std::cerr << "[AudioEngine] loadBackingTrack OK sr=" << readerSampleRate
               << " len=" << readerLengthInSamples
               << std::endl;
@@ -1678,6 +1686,17 @@ int AudioEngine::renderBackingBlockLocked(int numSamples)
     if (!backingTransport->isPlaying())
         backingPlaying.store(false);
 
+    // Normalize the backing track to a consistent target loudness (-12 LUFS)
+    // BEFORE the mixer's backing-volume fader is applied (later in the RT
+    // callback), so every song sits at the same level while the fader still
+    // attenuates it. Standard BS.1770 K-weighting (full-mix music) + a brickwall
+    // limiter to keep boosted peaks safe. RT-safe (no allocation).
+    if (outSamples > 0 && sr > 0.0)
+    {
+        if (sr != backingLevelerSr) { backingLeveler.prepare(sr); backingLevelerSr = sr; }
+        backingLeveler.process(backingBuffer, outSamples, -12.0f);
+    }
+
     return outSamples;
 }
 
@@ -1861,6 +1880,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     float* const* outputData, int numOutputChannels,
     int numSamples, const juce::AudioIODeviceCallbackContext&)
 {
+    // Flush denormals (FTZ/DAZ) for the ENTIRE realtime callback. The chain is
+    // full of IIR state (NAM, cab IRs, VST amps/EQ/comp); after each note that
+    // state decays toward zero and lands in the denormal range, where every op
+    // is 10-100× slower — producing sporadic CPU spikes → buffer underruns heard
+    // as random "scratches" + frame stutter. Scoped so it only affects this path.
+    const juce::ScopedNoDenormals noDenormals;
+
     // Publish that the callback body is executing so removeSource() and deferred-
     // release reclamation know when no source is being processed (the body is
     // quiescent) and a removed source can be safely released. Index 0 = primary.
@@ -2437,6 +2463,12 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
                                       int numOutputChannels,
                                       int numSamples)
 {
+    // Split-mode output clock: this callback renders the backing track (phase
+    // vocoder + loudness leveler) and mixes it with the chain output. Those
+    // carry IIR/decay state too, so flush denormals here as well — the primary
+    // callback's ScopedNoDenormals does NOT reach this separate output thread.
+    const juce::ScopedNoDenormals noDenormals;
+
     juce::AudioBuffer<float> buffer(outputData, numOutputChannels, numSamples);
     if (numOutputChannels <= 0)
         return;
