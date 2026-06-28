@@ -406,7 +406,7 @@ private:
 
     // Master output (post-mix) — engine-global, not per-source.
     std::atomic<float> outputGain{1.0f};
-    std::atomic<float> backingVolume{0.7f};
+    std::atomic<float> backingVolume{0.8f};
     // Per-song loudness normalizer for the backing track (applied in
     // renderBackingBlockLocked, pre-fader). Owned + driven by the audio thread.
     BackingLeveler backingLeveler;
