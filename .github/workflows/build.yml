@@ -1,8 +1,10 @@
 name: Build
 
 on:
+  # Release builds only: plain pushes to main are covered by ship-ci.yml
+  # (checks) and nightly.yml (daily main build) — no need for a full
+  # 3-platform matrix on every merge.
   push:
-    branches: [main]
     tags: ['v*']
   # PRs do not build automatically — every commit during review would
   # otherwise re-run the full 3-platform matrix. Trigger the matrix build
@@ -175,8 +177,8 @@ jobs:
           wait-timeout-minutes: 5
 
       # Tester builds (non-tag only): macOS is packaged for distribution by the
-      # Velopack steps below, which run ONLY on tag pushes. On a plain push to
-      # main or a manual workflow_dispatch, electron-builder's "dir" target
+      # Velopack steps below, which run ONLY on tag pushes. On a manual
+      # workflow_dispatch, electron-builder's "dir" target
       # leaves an unpackaged release/mac-*/<productName>.app that the artifact
       # upload globs (AppImage/deb/exe/velopack) don't match — so testers got
       # no macOS build. Zip the .app with ditto (preserves the bundle's
