@@ -325,6 +325,70 @@ export function initAudioBridge(): void {
 
     ipcMain.handle('audio:isAvailable', () => audio !== null);
 
+    // Renderer-side diagnostics gate: the static bundle's routing watcher /
+    // renderer-bus feeder emit verbose [asio-diag] lines only when the app
+    // runs with --debug / --verbose / SLOPSMITH_DEBUG (issue: ASIO output —
+    // song audio heard on the default WASAPI device while guitar rides ASIO).
+    ipcMain.handle('debug:isEnabled', () => isDebugEnabled());
+
+    // [asio-diag] main-process routing snapshot. Polls the engine every 2s in
+    // debug mode and logs a one-line snapshot whenever the routing-relevant
+    // state changes (plus a 30s heartbeat so a log without transitions still
+    // proves the watcher was alive). Captures the native side of the story the
+    // renderer diagnostics can't see: which device types/names the engine
+    // actually opened, whether the backing transport is playing, and whether
+    // the renderer bus is enabled and moving frames.
+    if (audio && isDebugEnabled()) {
+        let lastSnapshot = '';
+        let lastLogged = 0;
+        // busFlowing must reflect the CURRENT poll interval: cumulative
+        // pushed/consumed counters never regress, so "> 0" would stay true
+        // forever after the first frame — masking a stalled bus, which is
+        // one of the states this diagnostic exists to expose.
+        let prevBusCounts: { pushed: number; consumed: number } | null = null;
+        setInterval(() => {
+            try {
+                if (!audio) return;
+                const running = !!audio.isAudioRunning?.();
+                const dev = running ? audio.getCurrentDevice?.() : null;
+                const bus = audio.getRendererBusMetrics?.() ?? null;
+                let busFlowing = false;
+                if (bus) {
+                    if (prevBusCounts) {
+                        busFlowing = bus.pushedFrames > prevBusCounts.pushed
+                            && bus.consumedFrames > prevBusCounts.consumed;
+                    }
+                    prevBusCounts = { pushed: bus.pushedFrames, consumed: bus.consumedFrames };
+                } else {
+                    prevBusCounts = null;
+                }
+                const snapshot = JSON.stringify({
+                    running,
+                    inputType: dev?.inputType ?? '',
+                    outputType: dev?.outputType ?? '',
+                    input: dev?.input ?? '',
+                    output: dev?.output ?? '',
+                    duplex: dev?.duplex ?? null,
+                    backingPlaying: !!audio.isBackingPlaying?.(),
+                    streamOutputActive: !!audio.isStreamOutputActive?.(),
+                    busEnabled: bus?.enabled ?? null,
+                    // per-poll delta ("moved this interval"), not cumulative.
+                    busFlowing,
+                    busUnderflows: bus?.underflowCount ?? null,
+                    busOverflows: bus?.overflowCount ?? null,
+                });
+                const now = Date.now();
+                if (snapshot !== lastSnapshot || now - lastLogged > 30000) {
+                    lastSnapshot = snapshot;
+                    lastLogged = now;
+                    console.log(`[asio-diag] engine: ${snapshot}`);
+                }
+            } catch (e: any) {
+                console.warn(`[asio-diag] snapshot failed: ${e.message}`);
+            }
+        }, 2000);
+    }
+
     // ── Device Management ──────────────────────────────────────────────────
 
     ipcMain.handle('audio:getDeviceTypes', () => {
