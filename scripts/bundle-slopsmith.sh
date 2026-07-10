@@ -47,8 +47,11 @@ echo "  Source: $SLOPSMITH_DIR"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR/static" "$BUNDLE_DIR/plugins"
 
-# Server + lib
-cp "$SLOPSMITH_DIR/server.py" "$BUNDLE_DIR/"
+# Server + lib. Copy ALL top-level .py modules, not just server.py — core
+# grows sibling modules (e.g. appstate.py, added in core#833) and a stale
+# whitelist here ships a server.py whose imports are missing, crashing the
+# packaged backend with ModuleNotFoundError on startup.
+cp "$SLOPSMITH_DIR"/*.py "$BUNDLE_DIR/"
 cp "$SLOPSMITH_DIR/VERSION" "$BUNDLE_DIR/"
 cp -r "$SLOPSMITH_DIR/lib" "$BUNDLE_DIR/"
 rm -rf "$BUNDLE_DIR/lib/__pycache__"
