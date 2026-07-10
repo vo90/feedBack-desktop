@@ -47,11 +47,26 @@ echo "  Source: $SLOPSMITH_DIR"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR/static" "$BUNDLE_DIR/plugins"
 
-# Server + lib
-cp "$SLOPSMITH_DIR/server.py" "$BUNDLE_DIR/"
+# Server + lib. Copy ALL top-level .py modules, not just server.py — core
+# grows sibling modules (e.g. appstate.py, added in core#833) and a stale
+# whitelist here ships a server.py whose imports are missing, crashing the
+# packaged backend with ModuleNotFoundError on startup.
+cp "$SLOPSMITH_DIR"/*.py "$BUNDLE_DIR/"
 cp "$SLOPSMITH_DIR/VERSION" "$BUNDLE_DIR/"
+# Copy every top-level python package (dir with __init__.py), not a hardcoded
+# list — core's R3 refactor keeps adding packages (routers/ in core#834, lib
+# extractions in #830/#831) and each miss ships a backend that dies on import.
+# plugins/ is bundled selectively further down; tests/ must never ship.
+for pkg in "$SLOPSMITH_DIR"/*/__init__.py; do
+    [ -f "$pkg" ] || continue
+    pkg_dir="$(dirname "$pkg")"
+    case "$(basename "$pkg_dir")" in
+        plugins|tests) continue ;;
+    esac
+    cp -r "$pkg_dir" "$BUNDLE_DIR/"
+done
 cp -r "$SLOPSMITH_DIR/lib" "$BUNDLE_DIR/"
-rm -rf "$BUNDLE_DIR/lib/__pycache__"
+find "$BUNDLE_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} +
 
 # Bundled content (progression paths, quests, shop definitions)
 [ -d "$SLOPSMITH_DIR/data" ] && cp -r "$SLOPSMITH_DIR/data" "$BUNDLE_DIR/"

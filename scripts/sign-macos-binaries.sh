@@ -29,7 +29,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-ENTITLEMENTS="$PROJECT_DIR/resources/entitlements.mac.plist"
+ENTITLEMENTS="$PROJECT_DIR/resources/entitlements.mac.entitlements"
 
 if [[ ! -f "$ENTITLEMENTS" ]]; then
     echo "[sign-macos] entitlements file missing: $ENTITLEMENTS" >&2
