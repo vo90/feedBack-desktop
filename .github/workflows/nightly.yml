@@ -375,10 +375,15 @@ jobs:
             artifacts/**/*.zip
           )
           # Filter to real files (globs that matched nothing expand to nothing
-          # under nullglob, but guard against directories sneaking in).
+          # under nullglob, but guard against directories sneaking in) and
+          # dedupe: the *.zip glob overlaps the velopack/** glob, and gh
+          # release create fails on duplicate asset names.
+          declare -A seen
           files=()
           for a in "${assets[@]}"; do
-            [[ -f "$a" ]] && files+=("$a")
+            [[ -f "$a" && -z "${seen[$a]:-}" ]] || continue
+            seen["$a"]=1
+            files+=("$a")
           done
           if [[ ${#files[@]} -eq 0 ]]; then
             echo "::error::No release assets found under artifacts/ — refusing to publish an empty nightly release."
