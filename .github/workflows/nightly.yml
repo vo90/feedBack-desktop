@@ -200,6 +200,9 @@ jobs:
       # Windows: pack the electron-builder unpacked dir into Velopack release
       # assets (per-machine MSI, *-full.nupkg, *-delta.nupkg,
       # releases.win-x64-nightly.json). Unsigned (same as build.yml's win pack).
+      # --noPortable: vpk's Portable.zip (Update.exe stub wrapping the app) is
+      # suppressed — the plain feedback-windows-x64.zip above is the one
+      # portable tester download.
       # See build.yml's "Velopack pack (Windows)" for the --msi / Setup.exe
       # policy rationale — this is a channel-swapped copy of it.
       - name: Velopack pack (Windows)
@@ -220,6 +223,7 @@ jobs:
             --channel "win-x64-nightly" \
             --packDir release/win-unpacked \
             --mainExe "$mainexe" \
+            --noPortable \
             --msi \
             --instLocation PerMachine \
             -o release/velopack
@@ -253,6 +257,8 @@ jobs:
       # applyable on user machines, so nightly notarizes here. Falls back to an
       # unsigned pack if any Apple secret is missing (forks / partial configs).
       # Runs before the keychain cleanup below (needs the signing cert).
+      # --noPortable: same as the Windows pack — the tester zip above is the
+      # one portable download; updates ride on the .nupkg feed.
       - name: Velopack pack (macOS)
         if: matrix.platform == 'mac'
         shell: bash
@@ -281,6 +287,7 @@ jobs:
               --channel "osx-arm64-nightly" \
               --packDir "$app" \
               --mainExe "$mainexe" \
+              --noPortable \
               -o release/velopack
           else
             # vpk notarizes through a notarytool *credential profile*. Create it
@@ -302,6 +309,7 @@ jobs:
               --channel "osx-arm64-nightly" \
               --packDir "$app" \
               --mainExe "$mainexe" \
+              --noPortable \
               -o release/velopack \
               --signAppIdentity "$APPLE_SIGNING_IDENTITY" \
               --signEntitlements "$PWD/resources/entitlements.mac.entitlements" \
@@ -364,12 +372,18 @@ jobs:
             artifacts/**/velopack/**/*
             artifacts/**/*.AppImage
             artifacts/**/*.deb
+            artifacts/**/*.zip
           )
           # Filter to real files (globs that matched nothing expand to nothing
-          # under nullglob, but guard against directories sneaking in).
+          # under nullglob, but guard against directories sneaking in) and
+          # dedupe: the *.zip glob overlaps the velopack/** glob, and gh
+          # release create fails on duplicate asset names.
+          declare -A seen
           files=()
           for a in "${assets[@]}"; do
-            [[ -f "$a" ]] && files+=("$a")
+            [[ -f "$a" && -z "${seen[$a]:-}" ]] || continue
+            seen["$a"]=1
+            files+=("$a")
           done
           if [[ ${#files[@]} -eq 0 ]]; then
             echo "::error::No release assets found under artifacts/ — refusing to publish an empty nightly release."
