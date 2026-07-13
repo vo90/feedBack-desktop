@@ -1188,6 +1188,10 @@ void AudioEngine::teardownSplitMode()
 
 void AudioEngine::startAudio()
 {
+    // Intent flag first — even if the device open below fails or a transient
+    // stop races in, "the user wants audio" survives (read by phase 8's
+    // setAudioDevices restart fix; see EngineState.h).
+    state.userWantsAudio.store(true, std::memory_order_relaxed);
     if (audioRunning.load(std::memory_order_relaxed))
     {
         fprintf(stderr, "[AudioEngine] startAudio: already running\n");
@@ -1244,6 +1248,7 @@ void AudioEngine::startAudio()
 
 void AudioEngine::stopAudio()
 {
+    state.userWantsAudio.store(false, std::memory_order_relaxed);
     if (slopsmith_vst_trace::isEnabled())
         fprintf(stderr, "[diag] stopAudio: audioRunning=%d inputCbReg=%d outputCbReg=%d\n",
             (int) audioRunning.load(std::memory_order_relaxed),

@@ -2,6 +2,7 @@
 #include "SourceChain.h"
 #include "GainSanitize.h"
 #include "engine/PackedStereoRing.h"
+#include "engine/EngineState.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -444,7 +445,12 @@ private:
     // with an SPSC ring between them.
     juce::AudioDeviceManager inputDeviceManager;
     juce::AudioDeviceManager outputDeviceManager;
-    std::atomic<bool> duplexMode{true};
+
+    // Shared run-state atomics (TLC phase 1) — the members below are
+    // reference aliases under their historical names so call sites are
+    // untouched; extracted units take `state` (EngineState&) directly.
+    slopsmith::EngineState state;
+    std::atomic<bool>& duplexMode = state.duplexMode;
 
     // Per-input capture+detect+monitor chains. A FIXED pool, all constructed up
     // front, so adding/removing a source never reassigns a pointer the audio
@@ -538,23 +544,12 @@ private:
     std::atomic<bool> backingSpeedChangePending{false};
     juce::CriticalSection backingLock;
 
-    // Toggled from startAudio()/stopAudio() (main / device-management
-    // threads) and read from isAudioRunning() on the JS thread via the
-    // audio-bridge dispatch loop. Plain bool would be a data race;
-    // relaxed-atomic is well-defined and compiles to a plain MOV.
-    std::atomic<bool> audioRunning{false};
-    // Sample rate is written from the JUCE device callbacks (audio
-    // thread / device-management thread) and read from arbitrary
-    // callers including the JS thread via getCurrentSampleRate(),
-    // so a plain double would be a C++ data race. std::atomic<double>
-    // is well-defined and lock-free on the platforms we ship; the
-    // hot reads use relaxed since the consumer just wants the latest
-    // observable value, not a synchronization point.
-    std::atomic<double> currentSampleRate{48000.0};
-    // Split mode allows different input vs output block sizes; the ring absorbs
-    // the asymmetry. DSP prepares against input; backing resampler against output.
-    std::atomic<int> inputBlockSize{256};
-    std::atomic<int> outputBlockSize{256};
+    // audioRunning keeps its historical DEVICE-STATE semantics (isAudioRunning
+    // compat pin); the intent half is state.userWantsAudio — see EngineState.h.
+    std::atomic<bool>& audioRunning = state.deviceRunning;
+    std::atomic<double>& currentSampleRate = state.currentSampleRate;
+    std::atomic<int>& inputBlockSize = state.inputBlockSize;
+    std::atomic<int>& outputBlockSize = state.outputBlockSize;
 
     // The per-input lock-free SPSC rings (pre-gate getInputFrame ring + post-gate
     // getRawAudioFrame ring), the YIN/ML detectors, and the zero-output capture
