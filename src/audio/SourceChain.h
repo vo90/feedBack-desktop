@@ -3,6 +3,7 @@
 #include "NoiseGate.h"
 #include "TonePolish.h"
 #include "SignalChain.h"
+#include "GainSanitize.h"
 #include "PitchDetector.h"
 #include "ChordScorer.h"
 #include "MlNoteDetector.h"
@@ -125,9 +126,11 @@ public:
     }
     void setTonePolishEnabled(bool enabled) { tonePolish.setEnabled(enabled); }
 
-    void setInputGain(float gain) { inputGain.store(gain); }
+    // Sanitized (see GainSanitize.h) so NaN/Inf from the JS bridge can't
+    // reach the audio thread via either the legacy or the indexed API.
+    void setInputGain(float gain) { inputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getInputGain() const { return inputGain.load(); }
-    void setChainOutputGain(float gain) { chainOutputGain.store(gain); }
+    void setChainOutputGain(float gain) { chainOutputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getChainOutputGain() const { return chainOutputGain.load(); }
     void setInputChannel(int channel) { selectedInputChannel.store(channel); }
     int getInputChannel() const { return selectedInputChannel.load(); }

@@ -1,5 +1,6 @@
 #pragma once
 #include "SourceChain.h"
+#include "GainSanitize.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -154,7 +155,10 @@ public:
     // Gain controls. Input + chain-output gain are per-source (sources[0]);
     // output gain is the post-mix master and stays engine-global.
     void setInputGain(float gain) { source0().setInputGain(gain); }
-    void setOutputGain(float gain) { outputGain.store(gain); }
+    // Sanitized (see GainSanitize.h): a NaN/Inf master gain from JS would
+    // multiply the whole device output to NaN downstream of the per-source
+    // scrub — clamp at the store so every caller is covered.
+    void setOutputGain(float gain) { outputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getInputGain() const { return source0().getInputGain(); }
     float getOutputGain() const { return outputGain.load(); }
 
@@ -216,7 +220,7 @@ public:
     void setTonePolishEnabled(bool enabled) { source0().setTonePolishEnabled(enabled); }
 
     // Backing track
-    void setBackingVolume(float vol) { backingVolume.store(vol); }
+    void setBackingVolume(float vol) { backingVolume.store(slopsmith::sanitizeMasterGain(vol)); }
     bool loadBackingTrack(const juce::File& file);
     void setBackingPosition(double seconds);
     void startBacking();
@@ -792,7 +796,7 @@ private:
 
     // Clamp a requested stream gain to a finite, sane range so a NaN/Inf (or a
     // wild value) from the JS bridge can never be packed into the stream ring.
-    static float sanitizeStreamGain(float g) { return std::isfinite(g) ? juce::jlimit(0.0f, 8.0f, g) : 0.0f; }
+    static float sanitizeStreamGain(float g) { return slopsmith::sanitizeStreamGain(g); }
 
     void streamSinkCallback(float* const* outputData, int numOutputChannels, int numSamples);
     void streamSinkAboutToStart(juce::AudioIODevice* device);
