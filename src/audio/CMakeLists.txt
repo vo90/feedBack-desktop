@@ -10,6 +10,7 @@ set(AUDIO_SOURCES
     engine/BackingPlayer.cpp
     engine/DeviceSetup.cpp
     engine/SourcePool.cpp
+    engine/ExtraInputs.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp

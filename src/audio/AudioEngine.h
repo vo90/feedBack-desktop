@@ -8,6 +8,7 @@
 #include "engine/BackingPlayer.h"
 #include "engine/DeviceSetup.h"
 #include "engine/SourcePool.h"
+#include "engine/ExtraInputs.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -96,7 +97,7 @@ public:
     // with an ALSA primary), minus the device already open as the primary (that's
     // "Main") and minus monitor/loopback pseudo-inputs. Keeps the per-panel device
     // picker to a compatible, sensible set instead of every capture node.
-    struct BindableInput { juce::String typeName; juce::String name; };
+    using BindableInput = slopsmith::ExtraInputs::Bindable;
     std::vector<BindableInput> getBindableInputDevices();
 
     juce::Array<double> getSampleRates();
@@ -485,75 +486,11 @@ private:
     // leave a live registration behind after stopAudio()'s single remove.
     bool inputCallbackRegistered = false;
 
-    // ── Phase 2: additional input devices ────────────────────────────────────
-    // Each ADDITIONAL physical input device (a 2nd/3rd USB interface, e.g. two
-    // separate cables) gets its own AudioDeviceManager + callback running on its
-    // OWN hardware clock, packing its sources' mixed monitor into its own SPSC
-    // ring. audioOutputCallback drains+sums every active ring (drop-oldest wrap
-    // absorbs each device's drift independently — no cross-device resampling, the
-    // failure mode that corrupts a software combine). deviceKey 0 = the primary
-    // inputDeviceManager above; deviceKeys 1..kMaxExtraInputDevices map to
-    // extraInputs[deviceKey-1]. When any extra device is active the engine runs
-    // split (the primary also uses its ring) so the output sum is uniform.
-    // (kMaxExtraInputDevices is declared up top, near kMaxSources.)
-
-    // Forwards a JUCE device callback to the engine, tagged with the slot index.
-    struct InputSlotCallback : juce::AudioIODeviceCallback
-    {
-        AudioEngine* engine = nullptr;
-        int slot = -1;  // index into extraInputs (deviceKey - 1)
-        void audioDeviceIOCallbackWithContext(const float* const* inputData, int numInputChannels,
-                                              float* const* outputData, int numOutputChannels,
-                                              int numSamples,
-                                              const juce::AudioIODeviceCallbackContext&) override
-        {
-            juce::ignoreUnused(outputData, numOutputChannels);
-            if (engine) engine->extraInputCallback(slot, inputData, numInputChannels, numSamples);
-        }
-        void audioDeviceAboutToStart(juce::AudioIODevice* d) override { if (engine) engine->extraInputAboutToStart(slot, d); }
-        void audioDeviceStopped() override { if (engine) engine->extraInputStopped(slot); }
-    };
-
-    struct InputDeviceSlot
-    {
-        juce::AudioDeviceManager manager;
-        InputSlotCallback callback;
-        slopsmith::PackedStereoRing<kOutputRingFrames> ring;
-        std::atomic<uint64_t> overflowCount{0};
-        std::atomic<bool> active{false};      // a device is bound + running
-        std::atomic<double> sampleRate{48000.0};
-        std::atomic<int> blockSize{256};
-        // (extra input latency − primary input latency) in seconds — applied to
-        // this device's sources' verifiers so their capture aligns with the
-        // primary-corrected playhead. Computed when the device starts.
-        std::atomic<double> latencyDeltaSec{0.0};
-        // Audio-thread scratch — one set per slot since each slot's callback runs
-        // on its own thread (can't share the primary's sourceMonitorScratch).
-        juce::AudioBuffer<float> fanScratch;       // the 2ch mix target
-        juce::AudioBuffer<float> monitorScratch;   // per-source render in the N>1 path
-        int deviceKey = 0;                         // deviceKey this slot serves (slot+1)
-        // The device the user WANTS bound here — persistent INTENT, distinct from
-        // the transient `active` (currently open). Set by bindInputDevice, cleared
-        // only by a user unbind. stopAudio()/reconfigure close the device but keep
-        // this so startAudio() re-opens it; this is what survives a device change.
-        // Mutated + read on the control thread only.
-        juce::String desiredDeviceName;
-        // Whether the NEXT extraInputStopped() for this slot is a PERMANENT unbind
-        // (deactivate its sources) vs a transient close (keep them to resume). An
-        // atomic the control thread sets and the device thread reads, so the
-        // permanent-vs-transient decision never races on the juce::String above.
-        std::atomic<bool> permanentUnbind { false };
-    };
-    std::array<InputDeviceSlot, kMaxExtraInputDevices> extraInputs;
-
-    // Per-slot callback hooks (audio + device-management threads).
-    void extraInputCallback(int slot, const float* const* inputData, int numInputChannels, int numSamples);
-    void extraInputAboutToStart(int slot, juce::AudioIODevice* device);
-    void extraInputStopped(int slot);
-    // Close an extra device but KEEP its desiredDeviceName (transient close for
-    // stop/reconfigure); reopenDesiredExtraInputs() restores them after a (re)start.
-    bool closeExtraInputDevice(int slot);
-    void reopenDesiredExtraInputs();
+    // ── Additional input devices — moved to engine/ExtraInputs.{h,cpp}
+    // (TLC phase 5). The split output callback drains extraInputs.slots
+    // directly; declared after pool/state (bound by reference).
+    slopsmith::ExtraInputs extraInputs{ pool, state, inputDeviceManager };
+    using InputDeviceSlot = slopsmith::ExtraInputs::InputDeviceSlot;
 
     // (mixSourcesForDevice moved to SourcePool::mixForDevice — TLC phase 5.)
 
