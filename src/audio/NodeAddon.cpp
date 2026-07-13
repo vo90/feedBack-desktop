@@ -18,10 +18,6 @@
 #include "AudioEngine.h"
 #include "VSTHost.h"
 
-// Forward declaration — defined alongside loadVstSandboxAware further down.
-// doShutdown (below) needs it to release any LoadVSTWorker / LoadPreset-
-// Worker blocked on a pending async load before the message thread stops.
-static void cancelAllPendingLoads();
 #include "VSTTrace.h"
 #include "NAMProcessor.h"
 #include "IRLoader.h"
@@ -30,29 +26,18 @@ static void cancelAllPendingLoads();
 
 #include <juce_events/juce_events.h>
 
-// engine / vstHost — shared_ptr (not unique_ptr) so worker threads can take
-// a stable snapshot that keeps the object alive for the duration of their
-// work, even if the message thread reassigns the global mid-operation. This
-// matters most for the async VST load: createPluginInstanceAsync's JUCE
-// continuation must not have VSTHost / its formatManager torn out from
-// under it mid-load.
-//
-// snapshotEngine() / snapshotVstHost() take the global under the matching
-// mutex and return a private copy. The only code permitted to touch the
-// bare `engine` / `vstHost` globals is the snapshot helpers below and the
-// mutex-guarded writes in Init / doShutdown — the message thread mutates
-// the globals there while worker threads and the napi handlers read them.
-//
-// Enforced rule: every *dereference* of engine / vstHost goes through a
-// local snapshot. A napi handler takes that snapshot at the top, null-
-// checks it, and uses only the local — either for the rest of its body,
-// or (for the handlers that hand off to an AsyncWorker — LoadVST,
-// LoadNAMModel, LoadIR, LoadPreset) purely as the availability guard
-// before queuing, with the worker re-snapshotting on its own thread.
-// Either way a concurrent doShutdown reset can never pull the object out
-// from under an in-flight dereference.
-static std::shared_ptr<AudioEngine> engine;
-static std::mutex engineMutex;
+#include "addon/AddonContext.h"
+#include "addon/NapiHelpers.h"
+
+// Lifetime/threading moved to addon/AddonContext (TLC phase 6); the usings
+// keep the 100+ existing binding bodies unchanged.
+using slopsmith::addon::snapshotEngine;
+using slopsmith::addon::snapshotVstHost;
+using slopsmith::addon::dispatchOnMessageThread;
+using slopsmith::addon::registerPendingLoad;
+using slopsmith::addon::unregisterPendingLoad;
+using slopsmith::addon::cancelAllPendingLoads;
+using slopsmith::addon::doShutdown;
 
 // Decode a state blob that may be in EITHER base64 flavour. JUCE's
 // MemoryBlock::fromBase64Encoding only understands JUCE's own proprietary
@@ -80,12 +65,6 @@ static bool decodeStateBlob(const juce::String& s, juce::MemoryBlock& mb,
     return juce::Base64::convertFromBase64(mo, s) && mb.getSize() > 0;
 }
 
-static std::shared_ptr<AudioEngine> snapshotEngine()
-{
-    std::lock_guard<std::mutex> lock(engineMutex);
-    return engine;
-}
-
 // Validate a JS source-id argument and return the live source, or nullptr if it is
 // missing / not a Number / not a FINITE INTEGER / out of range. The TS bridge already
 // validates, but the addon must fail soft on its own: Int32Value() silently coerces
@@ -102,15 +81,6 @@ static SourceChain* getValidatedSource(AudioEngine* eng, const Napi::CallbackInf
     return eng->getSource((int) raw);
 }
 
-static std::shared_ptr<VSTHost> vstHost;
-static std::mutex vstHostMutex;
-
-static std::shared_ptr<VSTHost> snapshotVstHost()
-{
-    std::lock_guard<std::mutex> lock(vstHostMutex);
-    return vstHost;
-}
-
 static double loadSafeSampleRate(const AudioEngine& eng)
 {
     const double sr = eng.getCurrentSampleRate();
@@ -121,79 +91,6 @@ static int loadSafeBlockSize(const AudioEngine& eng)
 {
     const int bs = eng.getCurrentBlockSize();
     return bs > 0 ? bs : 256;
-}
-
-static std::thread juceMessageThread;
-static std::atomic<bool> juceRunning{false};
-static std::atomic<bool> alreadyShutDown{false};
-
-// ── JUCE Message Thread ───────────────────────────────────────────────────────
-// JUCE requires a message thread for plugin loading, audio device management, etc.
-// We pump it in a dedicated thread.
-
-static void startJuceMessageThread()
-{
-    if (juceRunning.load()) return;
-    juceRunning.store(true);
-
-#if JUCE_MAC
-    // On macOS, JUCE's MessageManager::runDispatchLoopUntil internally calls
-    // `-[NSApplication _nextEventMatchingEventMask:...]`, which AppKit asserts
-    // must run on the true main thread. Node.js already owns the main thread
-    // (running libuv's event loop), so we can't spawn a second NS event pump
-    // without hitting `nextEventMatchingMask should only be called from the
-    // Main Thread!` and aborting.
-    //
-    // Workaround: designate Node's current thread as JUCE's message thread and
-    // skip the dispatch loop. callAsync()'d callbacks will still queue; we
-    // drain them from the Node thread via a libuv timer created below.
-    juce::MessageManager::getInstance();
-#else
-    juceMessageThread = std::thread([]() {
-        juce::MessageManager::getInstance();
-        while (juceRunning.load())
-        {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil(50);
-        }
-        juce::MessageManager::deleteInstance();
-    });
-#endif
-}
-
-static void stopJuceMessageThread()
-{
-    juceRunning.store(false);
-#if !JUCE_MAC
-    if (juceMessageThread.joinable())
-        juceMessageThread.join();
-#else
-    juce::MessageManager::deleteInstance();
-#endif
-}
-
-// ── Helper: dispatch on JUCE message thread ───────────────────────────────────
-
-template <typename Func>
-static void dispatchOnMessageThread(Func&& func)
-{
-#if JUCE_MAC
-    // No background message thread on macOS — execute inline on caller thread.
-    // Audio device / NAM / IR init is thread-safe for our use; VST/AU plugin
-    // instantiation (which genuinely requires a message thread on macOS) is
-    // the one capability we give up until a proper libuv-based pump lands.
-    func();
-#else
-    // Heap-allocate the WaitableEvent and capture by value so the queued
-    // callAsync closure can outlive this stack frame. Without this, a 15 s
-    // timeout (rare, but possible during shutdown when the message thread is
-    // busy) leaves the lambda running on freed `done` storage — a real UAF.
-    auto done = std::make_shared<juce::WaitableEvent>();
-    juce::MessageManager::callAsync([func = std::forward<Func>(func), done]() mutable {
-        func();
-        done->signal();
-    });
-    done->wait(15000);
-#endif
 }
 
 // Destroys every in-process plugin editor window. MUST be called on the message
@@ -207,99 +104,10 @@ static void destroyAllPluginEditorWindowsOnMessageThread();
 
 static Napi::Value Init(const Napi::CallbackInfo& info)
 {
-    auto env = info.Env();
-
-    // Reset the shutdown latch so a JS-level init→shutdown→init cycle (e.g.
-    // a test harness recreating the engine) actually runs shutdown again
-    // instead of treating it as already-done.
-    alreadyShutDown.store(false, std::memory_order_release);
-
-    // Start JUCE message thread first (no-op on macOS — see startJuceMessageThread)
-    startJuceMessageThread();
-
-#if !JUCE_MAC
-    // Small delay to ensure message thread is pumping
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-#endif
-
-    // Create engine on the JUCE message thread (or inline on macOS)
-    dispatchOnMessageThread([]() {
-        std::shared_ptr<AudioEngine> liveEngine;
-        {
-            std::lock_guard<std::mutex> lock(engineMutex);
-            engine = std::make_shared<AudioEngine>();
-            liveEngine = engine;
-        }
-        {
-            std::lock_guard<std::mutex> lock(vstHostMutex);
-            vstHost = std::make_shared<VSTHost>();
-        }
-
-        auto types = liveEngine->getDeviceTypes();
-        fprintf(stderr, "[audio-native] Init complete. Device types: %d\n", types.size());
-        for (int i = 0; i < types.size(); ++i)
-            fprintf(stderr, "[audio-native]   %s: %d inputs, %d outputs\n",
-                    types[i].name.toRawUTF8(),
-                    types[i].inputDevices.size(),
-                    types[i].outputDevices.size());
-    });
-
-    return env.Undefined();
-}
-
-static void doShutdown()
-{
-    // The latch is flipped at the TOP rather than the bottom so a
-    // re-entrant call (e.g. env-cleanup-hook firing while a JS-level
-    // shutdown is mid-flight) bails immediately rather than racing on
-    // the same teardown sequence. Assumed serialisation invariants:
-    //   - dispatchOnMessageThread is single-writer to engine/vstHost
-    //     (both unique_ptrs touched only here or from Init);
-    //   - stopJuceMessageThread is idempotent and safe to call when the
-    //     thread was never started (defensive checks inside).
-    // If a future caller mutates engine/vstHost between this latch and
-    // the dispatch (or the dispatch's 15s wait times out), THIS call's
-    // body may not finish before returning — but the re-entrant
-    // cleanup-hook will then no-op via the latch and the dispatch
-    // queue itself unwinds whatever's pending. Net result: at-most-
-    // once execution of the gated body, even under teardown races.
-    bool expected = false;
-    if (!alreadyShutDown.compare_exchange_strong(expected, true)) return;
-
-    // Release any LoadVSTWorker / LoadPresetWorker currently blocked on a
-    // pending async load. Without this they'd wait forever on the
-    // WaitableEvent — the createPluginInstanceAsync callback can't fire
-    // once the message thread is gone. Forward-declared above; the
-    // implementation lives near loadVstSandboxAware.
-    cancelAllPendingLoads();
-
-    if (juceRunning.load() || snapshotEngine() || snapshotVstHost())
-    {
-        dispatchOnMessageThread([]() {
-            // Editors reference their slot's processor; engine.reset() below
-            // frees the whole chain, so destroy the editor windows first (#56).
-            // Already on the message thread here — call the inline variant
-            // directly (closeAllPluginEditorWindows() would reach the same code
-            // via its message-thread branch; this just skips the thread check).
-            destroyAllPluginEditorWindowsOnMessageThread();
-            if (auto liveEngine = snapshotEngine())
-                liveEngine->stopAudio();
-            {
-                std::lock_guard<std::mutex> lock(engineMutex);
-                engine.reset();
-            }
-            {
-                std::lock_guard<std::mutex> lock(vstHostMutex);
-                vstHost.reset();
-            }
-        });
-    }
-
-    stopJuceMessageThread();
-
-    // Restore the previous top-level exception filter — the addon (and thus our
-    // unhandledFilter's code) may be unloaded, so it must not stay installed.
-    slopsmith::sandbox::uninstallVstCrashAttribution();
+    // Engine/vstHost creation + message-thread start live on AddonContext;
+    // the UI teardown hook runs at shutdown BEFORE engine.reset() (#56).
+    slopsmith::addon::initialize([] { destroyAllPluginEditorWindowsOnMessageThread(); });
+    return info.Env().Undefined();
 }
 
 static Napi::Value Shutdown(const Napi::CallbackInfo& info)
@@ -628,8 +436,11 @@ static Napi::Value SetGain(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (!liveEngine || info.Length() < 2) return env.Undefined();
 
+    if (!info[0].IsString()) return env.Undefined();
     auto which = info[0].As<Napi::String>().Utf8Value();
-    float value = info[1].As<Napi::Number>().FloatValue();
+    const auto valueOpt = slopsmith::addon::argFiniteFloat(info, 1);
+    if (!valueOpt) return env.Undefined();  // engine clamps range; NaN/Inf rejected here
+    const float value = *valueOpt;
 
     if (which == "input") liveEngine->setInputGain(value);
     else if (which == "output") liveEngine->setOutputGain(value);
@@ -2028,28 +1839,6 @@ static Napi::Value SetVstCrashSentinelPath(const Napi::CallbackInfo& info)
 // signals them all so the workers unblock and return a clean "cancelled"
 // error instead of hanging forever when the JUCE message thread is about
 // to be stopped (and any unfired callback would never arrive).
-static std::mutex pendingLoadsMutex;
-static std::set<std::shared_ptr<juce::WaitableEvent>> pendingLoads;
-
-static void registerPendingLoad(std::shared_ptr<juce::WaitableEvent> evt)
-{
-    std::lock_guard<std::mutex> lock(pendingLoadsMutex);
-    pendingLoads.insert(std::move(evt));
-}
-
-static void unregisterPendingLoad(const std::shared_ptr<juce::WaitableEvent>& evt)
-{
-    std::lock_guard<std::mutex> lock(pendingLoadsMutex);
-    pendingLoads.erase(evt);
-}
-
-static void cancelAllPendingLoads()
-{
-    std::lock_guard<std::mutex> lock(pendingLoadsMutex);
-    for (auto& evt : pendingLoads) evt->signal();
-    pendingLoads.clear();
-}
-
 // Load a VST3, routing it through the out-of-process sandbox when
 // shouldSandbox() says so (the filename pre-seed or the runtime crash
 // blocklist), otherwise loading it in-process. The in-process load uses
@@ -2171,7 +1960,7 @@ static std::unique_ptr<juce::AudioProcessor> loadVstSandboxAware(
     // Check alreadyShutDown after registering to catch the inverse race
     // (shutdown ran before we registered): if it's already set, the
     // shutdown won't see this event and we must bail ourselves.
-    if (alreadyShutDown.load(std::memory_order_acquire))
+    if (slopsmith::addon::isShuttingDown())
     {
         unregisterPendingLoad(done);
         error = "shutdown in flight";
@@ -2195,7 +1984,7 @@ static std::unique_ptr<juce::AudioProcessor> loadVstSandboxAware(
             // lambda and the message thread picking it up. Bail before
             // kicking off another in-flight createPluginInstanceAsync
             // that the shutdown would otherwise have to wait on.
-            if (alreadyShutDown.load(std::memory_order_acquire))
+            if (slopsmith::addon::isShuttingDown())
             {
                 *loadError = "shutdown in flight";
                 done->signal();
@@ -2282,7 +2071,7 @@ public:
         // mid-load. The atomic alreadyShutDown gate is the early-out: once
         // it's set, the dispatched reset is on its way and there's no point
         // continuing.
-        if (alreadyShutDown.load(std::memory_order_acquire))
+        if (slopsmith::addon::isShuttingDown())
         {
             error_ = "shutdown in flight";
             return;
@@ -2333,7 +2122,7 @@ public:
         // dispatched reset of engine/vstHost is on its way and any use of
         // the pointers from this worker thread is racy. The atomic check is
         // the authoritative "should I still be touching engine?" signal.
-        if (alreadyShutDown.load(std::memory_order_acquire))
+        if (slopsmith::addon::isShuttingDown())
         {
             error_ = "engine torn down during load";
             return;
@@ -2620,36 +2409,32 @@ static Napi::Value ReplaceIR(const Napi::CallbackInfo& info)
 
 static Napi::Value RemoveProcessor(const Napi::CallbackInfo& info)
 {
+    // Typed extractors (addon/NapiHelpers.h): NaN/Inf slot ids used to coerce
+    // to slot 0 and mutate the wrong slot (deep-read §2) — now a clean no-op.
     auto liveEngine = snapshotEngine();
-    if (liveEngine && info.Length() > 0)
-    {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        liveEngine->getSignalChain().removeProcessor(slotId);
-    }
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    if (liveEngine && slotId)
+        liveEngine->getSignalChain().removeProcessor(*slotId);
     return info.Env().Undefined();
 }
 
 static Napi::Value MoveProcessor(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
-    if (liveEngine && info.Length() >= 2)
-    {
-        int from = info[0].As<Napi::Number>().Int32Value();
-        int to = info[1].As<Napi::Number>().Int32Value();
-        liveEngine->getSignalChain().moveProcessor(from, to);
-    }
+    const auto from = slopsmith::addon::argSlotId(info, 0);
+    const auto to = slopsmith::addon::argSlotId(info, 1);
+    if (liveEngine && from && to)
+        liveEngine->getSignalChain().moveProcessor(*from, *to);
     return info.Env().Undefined();
 }
 
 static Napi::Value SetBypass(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
-    if (liveEngine && info.Length() >= 2)
-    {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        bool bypassed = info[1].As<Napi::Boolean>().Value();
-        liveEngine->getSignalChain().setBypass(slotId, bypassed);
-    }
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    const auto bypassed = slopsmith::addon::argBool(info, 1);
+    if (liveEngine && slotId && bypassed)
+        liveEngine->getSignalChain().setBypass(*slotId, *bypassed);
     return info.Env().Undefined();
 }
 
@@ -2676,9 +2461,9 @@ static Napi::Value SetPan(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (liveEngine && info.Length() >= 2)
     {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        float pan = (float) info[1].As<Napi::Number>().DoubleValue();
-        liveEngine->getSignalChain().setPan(slotId, pan);
+        const auto slotId = slopsmith::addon::argSlotId(info, 0);
+        const auto pan = slopsmith::addon::argFiniteFloat(info, 1);
+        if (slotId && pan) liveEngine->getSignalChain().setPan(*slotId, *pan);
     }
     return info.Env().Undefined();
 }
@@ -2688,9 +2473,9 @@ static Napi::Value SetPostGain(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (liveEngine && info.Length() >= 2)
     {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        float gain = (float) info[1].As<Napi::Number>().DoubleValue();
-        liveEngine->getSignalChain().setPostGain(slotId, gain);
+        const auto slotId = slopsmith::addon::argSlotId(info, 0);
+        const auto gain = slopsmith::addon::argFiniteFloat(info, 1);
+        if (slotId && gain) liveEngine->getSignalChain().setPostGain(*slotId, *gain);
     }
     return info.Env().Undefined();
 }
@@ -2700,9 +2485,9 @@ static Napi::Value SetBranch(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (liveEngine && info.Length() >= 2)
     {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        int branch = info[1].As<Napi::Number>().Int32Value();
-        liveEngine->getSignalChain().setBranch(slotId, branch);
+        const auto slotId = slopsmith::addon::argSlotId(info, 0);
+        const auto branch = slopsmith::addon::argInt(info, 1);
+        if (slotId && branch) liveEngine->getSignalChain().setBranch(*slotId, *branch);
     }
     return info.Env().Undefined();
 }
@@ -2713,9 +2498,9 @@ static Napi::Value SetBranchSrc(const Napi::CallbackInfo& info)
     auto liveEngine = snapshotEngine();
     if (liveEngine && info.Length() >= 2)
     {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        int src = info[1].As<Napi::Number>().Int32Value();
-        liveEngine->getSignalChain().setBranchSrc(slotId, src);
+        const auto slotId = slopsmith::addon::argSlotId(info, 0);
+        const auto branchSrc = slopsmith::addon::argInt(info, 1, 0, 2);
+        if (slotId && branchSrc) liveEngine->getSignalChain().setBranchSrc(*slotId, *branchSrc);
     }
     return info.Env().Undefined();
 }
@@ -3138,13 +2923,11 @@ static Napi::Value GetParameters(const Napi::CallbackInfo& info)
 static Napi::Value SetParameter(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();
-    if (liveEngine && info.Length() >= 3)
-    {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
-        int paramIdx = info[1].As<Napi::Number>().Int32Value();
-        float value = info[2].As<Napi::Number>().FloatValue();
-        liveEngine->getSignalChain().setParameter(slotId, paramIdx, value);
-    }
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    const auto paramIdx = slopsmith::addon::argSlotId(info, 1);
+    const auto value = slopsmith::addon::argFiniteFloat(info, 2);
+    if (liveEngine && slotId && paramIdx && value)
+        liveEngine->getSignalChain().setParameter(*slotId, *paramIdx, *value);
     return info.Env().Undefined();
 }
 
@@ -3178,26 +2961,30 @@ static Napi::Value SendMidiToSlot(const Napi::CallbackInfo& info)
     if (!liveEngine || info.Length() < 4)
         return Napi::Boolean::New(env, false);
 
-    int slotId = info[0].As<Napi::Number>().Int32Value();
-    int msgType = info[1].As<Napi::Number>().Int32Value();
-    int channel = info[2].As<Napi::Number>().Int32Value();
-
-    juce::MidiMessage midiMsg;
-    if (msgType == 0) // Program Change
-    {
-        int program = info[3].As<Napi::Number>().Int32Value();
-        midiMsg = juce::MidiMessage::programChange(channel, program);
-    }
-    else if (msgType == 1) // Control Change
-    {
-        int controller = info[3].As<Napi::Number>().Int32Value();
-        int value = info.Length() > 4 ? info[4].As<Napi::Number>().Int32Value() : 0;
-        midiMsg = juce::MidiMessage::controllerEvent(channel, controller, value);
-    }
-    else
+    // Typed + range-checked: unclamped channel/program used to trip JUCE
+    // assertions (deep-read §2). Out-of-range now returns false cleanly.
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    const auto msgType = slopsmith::addon::argInt(info, 1, 0, 1);
+    const auto channel = slopsmith::addon::argMidiChannel(info, 2);
+    if (!slotId || !msgType || !channel)
         return Napi::Boolean::New(env, false);
 
-    liveEngine->getSignalChain().queueMidiMessage(slotId, midiMsg);
+    juce::MidiMessage midiMsg;
+    if (*msgType == 0) // Program Change
+    {
+        const auto program = slopsmith::addon::argMidiByte(info, 3);
+        if (!program) return Napi::Boolean::New(env, false);
+        midiMsg = juce::MidiMessage::programChange(*channel, *program);
+    }
+    else // Control Change
+    {
+        const auto controller = slopsmith::addon::argMidiByte(info, 3);
+        if (!controller) return Napi::Boolean::New(env, false);
+        const auto value = slopsmith::addon::argMidiByte(info, 4);
+        midiMsg = juce::MidiMessage::controllerEvent(*channel, *controller, value.value_or(0));
+    }
+
+    liveEngine->getSignalChain().queueMidiMessage(*slotId, midiMsg);
     return Napi::Boolean::New(env, true);
 }
 
@@ -3264,8 +3051,10 @@ static Napi::Value SetBackingSpeed(const Napi::CallbackInfo& info)
             .ThrowAsJavaScriptException();
         return env.Undefined();
     }
-    if (engine)
-        engine->setBackingSpeed(info[0].As<Napi::Number>().DoubleValue());
+    // (Was a bare `engine` dereference — the one binding that dodged the
+    // file's own snapshot rule; surfaced by the phase-6 move.)
+    if (auto liveEngine = snapshotEngine())
+        liveEngine->setBackingSpeed(info[0].As<Napi::Number>().DoubleValue());
     return env.Undefined();
 }
 
@@ -3469,10 +3258,17 @@ static Napi::Value SetMultiBypass(const Napi::CallbackInfo& info)
 
     for (uint32_t i = 0; i < arr.Length(); i++)
     {
-        auto item = arr.Get(i).As<Napi::Object>();
-        int slotId = item.Get("slotId").As<Napi::Number>().Int32Value();
-        bool bypassed = item.Get("bypassed").As<Napi::Boolean>().Value();
-        changes.add({ slotId, bypassed });
+        // Per-item type guards (deep-read §2): a malformed entry is skipped
+        // instead of coercing NaN to slot 0.
+        auto itemVal = arr.Get(i);
+        if (!itemVal.IsObject()) continue;
+        auto item = itemVal.As<Napi::Object>();
+        auto slotVal = item.Get("slotId");
+        auto bypVal = item.Get("bypassed");
+        if (!slotVal.IsNumber() || !bypVal.IsBoolean()) continue;
+        const double raw = slotVal.As<Napi::Number>().DoubleValue();
+        if (!std::isfinite(raw) || raw != std::floor(raw) || raw < 0.0 || raw > 4096.0) continue;
+        changes.add({ (int) raw, bypVal.As<Napi::Boolean>().Value() });
     }
 
     liveEngine->getSignalChain().setMultiBypass(changes);

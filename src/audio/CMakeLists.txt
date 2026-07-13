@@ -11,6 +11,7 @@ set(AUDIO_SOURCES
     engine/DeviceSetup.cpp
     engine/SourcePool.cpp
     engine/ExtraInputs.cpp
+    addon/AddonContext.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp
