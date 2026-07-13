@@ -40,12 +40,45 @@ function isFiniteNumber(v: unknown): v is number {
     return typeof v === 'number' && Number.isFinite(v);
 }
 
+// Size floor + fallback size. The main window's values are the defaults, so
+// every existing call site behaves exactly as before; a pane window passes its
+// own, because a 380x560 pane clamped to the main window's 800x600 floor would
+// be silently inflated into something three times its intended size.
+export interface WindowSizing {
+    minWidth: number;
+    minHeight: number;
+    defaultWidth: number;
+    defaultHeight: number;
+}
+
+const MAIN_WINDOW_SIZING: WindowSizing = {
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
+    defaultWidth: DEFAULT_WIDTH,
+    defaultHeight: DEFAULT_HEIGHT,
+};
+
 // Validate saved bounds against the current display layout. Untrusted input
 // (hand-edited/corrupt config, unplugged monitor, resolution change) degrades
 // to defaults rather than producing an off-screen or absurd window. Omitted
 // x/y means "let Electron center the window".
-export function sanitizeWindowBounds(saved: unknown, displays: DisplayRect[]): RestoredWindowBounds {
-    const defaults: RestoredWindowBounds = { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, maximized: false };
+export function sanitizeWindowBounds(
+    saved: unknown,
+    displays: DisplayRect[],
+    sizing: WindowSizing = MAIN_WINDOW_SIZING,
+): RestoredWindowBounds {
+    // The floor applies to the FALLBACK too, not just to saved bounds.
+    //
+    // The min clamp below only runs when `saved` parses. So a caller whose defaults
+    // are smaller than its own minimums would get a window under the floor on
+    // exactly the paths where nothing is saved — first launch, or a corrupt config —
+    // and a perfectly sized one everywhere else. That is the worst shape a bug can
+    // have: invisible in the common case, and only in front of a new user.
+    const defaults: RestoredWindowBounds = {
+        width: Math.max(sizing.defaultWidth, sizing.minWidth),
+        height: Math.max(sizing.defaultHeight, sizing.minHeight),
+        maximized: false,
+    };
     if (displays.length === 0) return defaults;
 
     const b = saved as SavedWindowBounds | undefined;
@@ -59,8 +92,8 @@ export function sanitizeWindowBounds(saved: unknown, displays: DisplayRect[]): R
     // display's workArea (window bigger than any screen → shrink to fit).
     const maxW = Math.max(...displays.map((d) => d.width));
     const maxH = Math.max(...displays.map((d) => d.height));
-    const width = Math.min(Math.max(Math.round(b.width), MIN_WIDTH), maxW);
-    const height = Math.min(Math.max(Math.round(b.height), MIN_HEIGHT), maxH);
+    const width = Math.min(Math.max(Math.round(b.width), sizing.minWidth), maxW);
+    const height = Math.min(Math.max(Math.round(b.height), sizing.minHeight), maxH);
 
     // Trust the position only if the window meaningfully overlaps some
     // display. Negative coordinates are valid multi-monitor layouts — this is

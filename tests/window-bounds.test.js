@@ -57,3 +57,56 @@ test('fractional coordinates are rounded to integers', () => {
     const out = sanitizeWindowBounds({ x: 10.6, y: 20.4, width: 1200.5, height: 800.2 }, [PRIMARY]);
     assert.deepEqual(out, { x: 11, y: 20, width: 1201, height: 800, maximized: false });
 });
+
+// ── Custom sizing (pane windows) ────────────────────────────────────────────
+//
+// sanitizeWindowBounds grew a `sizing` parameter so pane pop-outs could be small.
+// Without it, a 380×560 pane restored through the MAIN window's 800×600 floor would
+// be silently inflated to 800×600 — three times the size the plugin asked for. The
+// default argument keeps every existing call site byte-for-byte identical, so these
+// tests exist to pin the override itself, which is the part nothing else covers.
+
+const PANE_SIZING = { minWidth: 240, minHeight: 180, defaultWidth: 380, defaultHeight: 560 };
+
+test('custom sizing: a small pane is NOT inflated to the main window floor', () => {
+    const out = sanitizeWindowBounds({ x: 100, y: 100, width: 380, height: 560 }, [PRIMARY], PANE_SIZING);
+    assert.deepEqual(out, { x: 100, y: 100, width: 380, height: 560, maximized: false });
+});
+
+test('custom sizing: the min clamp uses the override, not MIN_WIDTH/MIN_HEIGHT', () => {
+    // Below the pane minimum (240×180) — clamped up to it, and nowhere near 800×600.
+    const out = sanitizeWindowBounds({ x: 10, y: 10, width: 50, height: 20 }, [PRIMARY], PANE_SIZING);
+    assert.deepEqual(out, { x: 10, y: 10, width: 240, height: 180, maximized: false });
+});
+
+test('custom sizing: missing/corrupt bounds fall back to the override defaults', () => {
+    assert.deepEqual(
+        sanitizeWindowBounds(undefined, [PRIMARY], PANE_SIZING),
+        { width: 380, height: 560, maximized: false },
+    );
+    assert.deepEqual(
+        sanitizeWindowBounds({ x: 'nope', y: 0, width: 380, height: 560 }, [PRIMARY], PANE_SIZING),
+        { width: 380, height: 560, maximized: false },
+    );
+});
+
+test('omitting sizing keeps the main window behaviour exactly as before', () => {
+    // The whole point of the default argument: existing call sites must not shift.
+    const out = sanitizeWindowBounds({ x: 10, y: 10, width: 50, height: 20 }, [PRIMARY]);
+    assert.deepEqual(out, { x: 10, y: 10, width: MIN_WIDTH, height: MIN_HEIGHT, maximized: false });
+});
+
+test('custom sizing: defaults below the configured minimum are clamped up', () => {
+    // A caller whose defaults undercut its own floor. The min clamp only runs on
+    // saved bounds, so without clamping the fallback too, the floor would hold
+    // everywhere EXCEPT first launch and a corrupt config — i.e. only for new users.
+    const silly = { minWidth: 240, minHeight: 180, defaultWidth: 100, defaultHeight: 50 };
+    assert.deepEqual(
+        sanitizeWindowBounds(undefined, [PRIMARY], silly),
+        { width: 240, height: 180, maximized: false },
+    );
+    assert.deepEqual(
+        sanitizeWindowBounds({ x: 0, y: 0, width: 'bad', height: 'bad' }, [PRIMARY], silly),
+        { width: 240, height: 180, maximized: false },
+    );
+});

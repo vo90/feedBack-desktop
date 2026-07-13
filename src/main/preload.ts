@@ -33,6 +33,8 @@ import {
     IPC_MAINTENANCE_GET_PATHS,
     IPC_MAINTENANCE_RESET,
     IPC_MAINTENANCE_RESTART,
+    IPC_PANE_SYNC,
+    IPC_PANE_EVENT_TOGGLE,
 } from './ipc-channels';
 
 // Auto-update channel + event payloads. Kept here (rather than re-exported
@@ -577,6 +579,21 @@ const feedBackDesktopApi = {
     // process drives powerSaveBlocker instead (got-feedback/feedback#686).
     power: {
         setScreenAwake: (keep: boolean) => ipcRenderer.invoke(IPC_POWER_SET_SCREEN_AWAKE, keep),
+    },
+    // Detachable panes. The renderer opens its own pane windows with window.open()
+    // — it moves a live DOM node into them and needs a handle on the new document
+    // to do it — and Electron turns that into a real BrowserWindow, which main
+    // recognises by its frame name and gives remembered bounds, skip-taskbar and a
+    // tray entry. So there is nothing here about opening or closing windows: only
+    // the registry the tray needs, and the tray asking for a pane.
+    panes: {
+        sync: (panes: Array<{ id: string; title: string; icon?: string; open?: boolean }>) =>
+            ipcRenderer.send(IPC_PANE_SYNC, panes),
+        onToggle: (callback: (paneId: string) => void) => {
+            const listener = (_event: unknown, payload: { paneId: string }) => callback(payload.paneId);
+            ipcRenderer.on(IPC_PANE_EVENT_TOGGLE, listener);
+            return () => ipcRenderer.removeListener(IPC_PANE_EVENT_TOGGLE, listener);
+        },
     },
 };
 

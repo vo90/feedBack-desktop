@@ -32,3 +32,22 @@ export const IPC_MAINTENANCE_RESTART = 'maintenance:restart' as const;
 // honour the renderer's navigator.wakeLock reliably, so we drive Electron's
 // powerSaveBlocker here instead. See got-feedback/feedback#686.
 export const IPC_POWER_SET_SCREEN_AWAKE = 'power:setScreenAwake' as const;
+
+// Detachable panes (feedBack core's window.feedBack.panes).
+//
+// Deliberately tiny. The renderer OPENS its own pane windows with window.open() —
+// it has to, because it moves a live DOM node into them and needs a handle on the
+// new document to do it (see pane-hosts.ts). Electron turns that same-origin
+// window.open() into a real BrowserWindow, and main recognises it by its frame
+// name. So there is no open/close/focus channel: main never creates or destroys a
+// pane window, it only dresses one up.
+//
+// That leaves exactly two things to say across the boundary.
+
+// Renderer → main: the pane registry, so the tray can list panes it otherwise
+// knows nothing about.
+export const IPC_PANE_SYNC = 'pane:sync' as const;
+
+// Main → renderer: the tray asked to open or close a pane. Only the renderer knows
+// what that means — the pane may belong in the dock, and its element lives there.
+export const IPC_PANE_EVENT_TOGGLE = 'pane:toggle' as const;

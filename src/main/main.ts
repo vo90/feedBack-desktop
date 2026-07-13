@@ -126,6 +126,11 @@ import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
+import {
+    initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName,
+    togglePaneWindow, showAllPaneWindows, hideAllPaneWindows,
+} from './pane-hosts';
+import { initTray, destroyTray } from './pane-tray';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
 // audio devices on PipeWire-only distros (Fedora 36+, recent Ubuntu, Arch).
@@ -779,12 +784,26 @@ function createWindow(port: number): void {
         wc.setWindowOpenHandler(rendererWindowOpenHandler);
         wc.on('did-create-window', (nestedWin) => wirePopupGuards(nestedWin.webContents));
     }
-    mainWindow.webContents.on('did-create-window', (popupWin) => {
+    mainWindow.webContents.on('did-create-window', (popupWin, details) => {
         wirePopupGuards(popupWin.webContents);
+        // A pane pop-out. The RENDERER opened it (window.open) because it moves a
+        // live DOM node into it and needs a handle on the new document to do that —
+        // see pane-hosts.ts. We recognise it by the frame name it was opened with
+        // and give it the OS behaviour a pane should have: remembered bounds, off
+        // the taskbar, minimize-to-tray, listed in the tray menu.
+        const paneId = paneIdFromFrameName(details.frameName || '');
+        if (paneId) adoptPaneWindow(popupWin, paneId);
     });
 
     mainWindow.on('closed', () => {
         mainWindow = null;
+        // Pane windows cannot outlive the window that feeds them: without the
+        // renderer there is nothing on the other end of their BroadcastChannel,
+        // so they would sit there showing a frozen playhead forever. Worse, a
+        // pane HIDDEN in the tray is still an open window — leaving one behind
+        // would stop `window-all-closed` from ever firing and the app would
+        // linger as an invisible process.
+        closeAllPanes();
     });
 
     // Dev tools in development
@@ -1167,6 +1186,21 @@ async function startup(): Promise<void> {
     // Create the main window
     createWindow(port);
 
+    // Detachable panes: the tray that lists them, and the OS behaviour applied to
+    // each pane window as the renderer opens it (see did-create-window above).
+    // Must come after createWindow — both reach the renderer through mainWindow,
+    // and Tray requires a ready app.
+    initPaneHosts({ getMainWindow: () => mainWindow });
+    // The tray's pane actions are INJECTED, not imported: pane-hosts already imports
+    // pane-tray (to push the menu), and importing back would make the two modules
+    // mutually dependent — a require cycle whose loser sees half-initialised exports.
+    initTray({
+        getMainWindow: () => mainWindow,
+        toggleWindow: togglePaneWindow,
+        showAll: showAllPaneWindows,
+        hideAll: hideAllPaneWindows,
+    });
+
     // Install our application menu (replaces Electron's default so View →
     // Zoom In also accepts the unshifted Ctrl+= key — see app-menu.ts).
     installAppMenu();
@@ -1373,6 +1407,7 @@ function shutdown(): void {
     try {
         console.log('[main] Shutting down...');
     } catch { /* console may already be gone mid-teardown */ }
+    destroyTray();
     powerAwakeRenderers.clear();
     syncPowerBlocker();
     updateManager.shutdown();
