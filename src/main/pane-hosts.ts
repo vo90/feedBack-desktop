@@ -46,11 +46,26 @@ let getMainWindow: () => BrowserWindow | null = () => null;
 
 // ── Geometry ────────────────────────────────────────────────────────────────
 
+// The config file is untrusted: hand-edited, corrupt, or written by a build that
+// disagrees with this one. It is read in the MAIN process, where a TypeError is not
+// a bad pane — it is the app failing to start.
+function savedPaneMap(): Record<string, unknown> {
+    const map = getDesktopConfig().paneWindows;
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
+    return map as Record<string, unknown>;
+}
+
 function savedFor(paneId: string): SavedPaneWindow {
-    const saved = getDesktopConfig().paneWindows ?? {};
+    const saved = savedPaneMap();
     // Own-property check: a polluted or hand-edited config would otherwise hand back
     // a value off the prototype chain for a pane that was never saved at all.
-    return Object.prototype.hasOwnProperty.call(saved, paneId) ? saved[paneId] : {};
+    if (!Object.prototype.hasOwnProperty.call(saved, paneId)) return {};
+    const entry = saved[paneId];
+    // `{"camera_director": null}` passes the own-property check and then explodes on
+    // `saved.bounds`. Anything that is not an object degrades to "nothing saved",
+    // which is exactly what an unreadable entry means.
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return {};
+    return entry as SavedPaneWindow;
 }
 
 // A pane id reaches us from the RENDERER (it is the tail of the frame name a
@@ -72,9 +87,15 @@ function persist(paneId: string, patch: SavedPaneWindow): void {
         // edited, corrupt, or written by an older build) cannot smuggle a prototype
         // into a map we then write keys onto.
         const all: Record<string, SavedPaneWindow> = Object.create(null);
-        const saved = getDesktopConfig().paneWindows ?? {};
+        const saved = savedPaneMap();
         for (const key of Object.keys(saved)) {
-            if (!isUnsafePaneId(key)) all[key] = saved[key];
+            if (isUnsafePaneId(key)) continue;
+            const entry = saved[key];
+            // Don't carry a corrupt entry forward. Spreading `null` into the patch
+            // below would be silently fine; writing it back out would keep a value
+            // that crashes savedFor() on the next launch forever.
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+            all[key] = entry as SavedPaneWindow;
         }
         all[paneId] = { ...(all[paneId] ?? {}), ...patch };
         setDesktopConfig({ paneWindows: { ...all } });
