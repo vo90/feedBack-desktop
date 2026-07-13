@@ -170,6 +170,32 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
     win.setMinimumSize(PANE_SIZING.minWidth, PANE_SIZING.minHeight);
     if (saved.alwaysOnTop === true) win.setAlwaysOnTop(true);
 
+    // A PANE CAN NEVER GO BEHIND THE APP.
+    //
+    // A pane is a control surface for the thing you are looking at. Clicking the
+    // highway to play — the single most common thing anyone does here — raises the
+    // main window, and a plain sibling window would slide straight behind it. You
+    // would have to fish the mixer back out from behind the game every time you
+    // touched the game. That is not a pop-out, it is a hiding place.
+    //
+    // Parenting to the main window (rather than setAlwaysOnTop) is the precise
+    // amount of "in front": the pane always floats above fee[dB]ack, and behaves
+    // like any other window against everything else. Always-on-top would put it
+    // above the user's browser and editor too — a surprising thing to inflict on
+    // someone for opening a mixer.
+    //
+    // alwaysOnTop remains available on top of this for a pane the user explicitly
+    // wants above EVERYTHING; the two compose.
+    const main = getMainWindow();
+    if (main && !main.isDestroyed()) {
+        try {
+            win.setParentWindow(main);
+        } catch (err) {
+            // Not fatal: a pane that can be buried is still a working pane.
+            console.warn(`[panes] could not parent ${paneId} to the main window:`, err);
+        }
+    }
+
     // A pane is a companion to the app, not an entry to it: keep it off the taskbar
     // so it never masquerades as a second fee[dB]ack.
     win.setSkipTaskbar(true);
