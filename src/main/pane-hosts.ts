@@ -261,7 +261,18 @@ export function initPaneHosts(deps: { getMainWindow: () => BrowserWindow | null 
     // The renderer pushes its registry whenever a pane is registered, opened or
     // closed, so the tray can list panes it otherwise knows nothing about.
     // Fire-and-forget: the tray is a view of the renderer's truth.
-    ipcMain.on(IPC_PANE_SYNC, (_event, panes: unknown) => {
+    //
+    // Only the MAIN window's truth, though. Pane windows are same-origin top-level
+    // frames, so preload.ts's isMainFrame gate gives them the bridge too — meaning a
+    // pane window (or any allowed pop-up) could send pane:sync and overwrite the
+    // tray's registry, most simply by pushing an empty list and emptying the menu.
+    // Only one renderer owns the pane registry; accept it from that one only.
+    ipcMain.on(IPC_PANE_SYNC, (event, panes: unknown) => {
+        const main = getMainWindow();
+        if (!main || main.isDestroyed() || event.sender !== main.webContents) {
+            console.warn('[panes] ignoring pane:sync from a webContents that is not the main window');
+            return;
+        }
         lastSync = Array.isArray(panes)
             ? panes.filter((p): p is TrayPane => !!p && typeof p.id === 'string' && typeof p.title === 'string')
             : [];

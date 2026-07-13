@@ -67,7 +67,18 @@ export function sanitizeWindowBounds(
     displays: DisplayRect[],
     sizing: WindowSizing = MAIN_WINDOW_SIZING,
 ): RestoredWindowBounds {
-    const defaults: RestoredWindowBounds = { width: sizing.defaultWidth, height: sizing.defaultHeight, maximized: false };
+    // The floor applies to the FALLBACK too, not just to saved bounds.
+    //
+    // The min clamp below only runs when `saved` parses. So a caller whose defaults
+    // are smaller than its own minimums would get a window under the floor on
+    // exactly the paths where nothing is saved — first launch, or a corrupt config —
+    // and a perfectly sized one everywhere else. That is the worst shape a bug can
+    // have: invisible in the common case, and only in front of a new user.
+    const defaults: RestoredWindowBounds = {
+        width: Math.max(sizing.defaultWidth, sizing.minWidth),
+        height: Math.max(sizing.defaultHeight, sizing.minHeight),
+        maximized: false,
+    };
     if (displays.length === 0) return defaults;
 
     const b = saved as SavedWindowBounds | undefined;

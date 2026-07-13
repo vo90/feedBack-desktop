@@ -95,3 +95,18 @@ test('omitting sizing keeps the main window behaviour exactly as before', () => 
     const out = sanitizeWindowBounds({ x: 10, y: 10, width: 50, height: 20 }, [PRIMARY]);
     assert.deepEqual(out, { x: 10, y: 10, width: MIN_WIDTH, height: MIN_HEIGHT, maximized: false });
 });
+
+test('custom sizing: defaults below the configured minimum are clamped up', () => {
+    // A caller whose defaults undercut its own floor. The min clamp only runs on
+    // saved bounds, so without clamping the fallback too, the floor would hold
+    // everywhere EXCEPT first launch and a corrupt config — i.e. only for new users.
+    const silly = { minWidth: 240, minHeight: 180, defaultWidth: 100, defaultHeight: 50 };
+    assert.deepEqual(
+        sanitizeWindowBounds(undefined, [PRIMARY], silly),
+        { width: 240, height: 180, maximized: false },
+    );
+    assert.deepEqual(
+        sanitizeWindowBounds({ x: 0, y: 0, width: 'bad', height: 'bad' }, [PRIMARY], silly),
+        { width: 240, height: 180, maximized: false },
+    );
+});
