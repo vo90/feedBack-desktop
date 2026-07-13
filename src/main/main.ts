@@ -117,6 +117,8 @@ import {
     IPC_UPDATE_CHECK_NOW,
     IPC_UPDATE_APPLY,
     IPC_POWER_SET_SCREEN_AWAKE,
+    IPC_WINDOW_GET_START_FULLSCREEN,
+    IPC_WINDOW_SET_START_FULLSCREEN,
 } from './ipc-channels';
 import { initAudioBridge, shutdownAudio } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
@@ -469,6 +471,7 @@ function createWindow(port: number): void {
         getDesktopConfig().windowBounds,
         screen.getAllDisplays().map((d) => d.workArea),
     );
+    const startFullscreen = getDesktopConfig().startFullscreen === true;
     mainWindow = new BrowserWindow({
         x: restored.x,
         y: restored.y,
@@ -476,17 +479,20 @@ function createWindow(port: number): void {
         height: restored.height,
         minWidth: MIN_WIDTH,
         minHeight: MIN_HEIGHT,
+        fullscreen: startFullscreen,
         title: 'fee[dB]ack',
         backgroundColor: '#0f172a', // slate-900 to match Slopsmith UI
         webPreferences: rendererWebPreferences,
     });
-    if (restored.maximized) mainWindow.maximize();
+    if (restored.maximized && !startFullscreen) mainWindow.maximize();
 
     // Persist geometry on close. getNormalBounds() so a maximized session
     // saves the underlying windowed size, restored + re-maximized next launch.
-    // ponytail: fullscreen is deliberately not persisted (launching straight
-    // into fullscreen is jarring, especially on macOS) and we save on close
-    // only — a crash loses the last session's geometry; add debounced
+    // Fullscreen is NOT auto-persisted from the live window state (launching
+    // straight into fullscreen is jarring, especially on macOS); it launches
+    // fullscreen ONLY when the user opts in via Settings → System → "Start in
+    // fullscreen" (config.startFullscreen, applied above). We save geometry on
+    // close only — a crash loses the last session's geometry; add debounced
     // resize/move saving if that ever matters.
     mainWindow.on('close', () => {
         if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1270,6 +1276,23 @@ async function startup(): Promise<void> {
             /* backend slow/failed to restart — return intended state anyway */
         }
         return { success: true, enabled: on, urls: getLanUrls() };
+    });
+
+    ipcMain.handle(IPC_WINDOW_GET_START_FULLSCREEN, () => getDesktopConfig().startFullscreen === true);
+    ipcMain.handle(IPC_WINDOW_SET_START_FULLSCREEN, (_event, on: unknown) => {
+        const value = on === true;
+        setDesktopConfig({ startFullscreen: value });
+        // Live-apply so the toggle is responsive, not silent-until-relaunch.
+        // Works on the first toggle on Windows/Linux. On macOS the FIRST enter on
+        // a window created windowed is dropped by AppKit (its native-fullscreen
+        // state machine isn't engaged until the window has been fullscreen once —
+        // creating with `fullscreen: true` engages it), so there it takes effect
+        // on next launch instead; the core Settings note tells macOS users that.
+        // Reliable live both ways once the window has entered fullscreen once.
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen() !== value) {
+            mainWindow.setFullScreen(value);
+        }
+        return value;
     });
 
     // Auto-update (Velopack). The renderer Settings panel reads the persisted

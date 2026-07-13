@@ -33,6 +33,12 @@ export const IPC_MAINTENANCE_RESTART = 'maintenance:restart' as const;
 // powerSaveBlocker here instead. See got-feedback/feedback#686.
 export const IPC_POWER_SET_SCREEN_AWAKE = 'power:setScreenAwake' as const;
 
+// Main-window fullscreen-at-launch preference. Renderer (Settings → System)
+// reads/writes it; main persists it in the desktop config and applies it on
+// window creation.
+export const IPC_WINDOW_GET_START_FULLSCREEN = 'window:getStartFullscreen' as const;
+export const IPC_WINDOW_SET_START_FULLSCREEN = 'window:setStartFullscreen' as const;
+
 // Detachable panes (feedBack core's window.feedBack.panes).
 //
 // Deliberately tiny. The renderer OPENS its own pane windows with window.open() —

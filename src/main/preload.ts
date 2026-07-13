@@ -30,6 +30,8 @@ import {
     IPC_UPDATE_EVENT_AVAILABLE,
     IPC_UPDATE_EVENT_DOWNLOADED,
     IPC_POWER_SET_SCREEN_AWAKE,
+    IPC_WINDOW_GET_START_FULLSCREEN,
+    IPC_WINDOW_SET_START_FULLSCREEN,
     IPC_MAINTENANCE_GET_PATHS,
     IPC_MAINTENANCE_RESET,
     IPC_MAINTENANCE_RESTART,
@@ -579,6 +581,14 @@ const feedBackDesktopApi = {
     // process drives powerSaveBlocker instead (got-feedback/feedback#686).
     power: {
         setScreenAwake: (keep: boolean) => ipcRenderer.invoke(IPC_POWER_SET_SCREEN_AWAKE, keep),
+    },
+    // Main-window preferences the renderer can't own because the main process
+    // must read them at window-creation time. Today: start-in-fullscreen, wired
+    // by feedBack core's Settings → System "Start in fullscreen" toggle
+    // (setupWindowOptions()). Both methods return the resulting boolean.
+    window: {
+        getStartFullscreen: (): Promise<boolean> => ipcRenderer.invoke(IPC_WINDOW_GET_START_FULLSCREEN),
+        setStartFullscreen: (on: boolean): Promise<boolean> => ipcRenderer.invoke(IPC_WINDOW_SET_START_FULLSCREEN, on),
     },
     // Detachable panes. The renderer opens its own pane windows with window.open()
     // — it moves a live DOM node into them and needs a handle on the new document
