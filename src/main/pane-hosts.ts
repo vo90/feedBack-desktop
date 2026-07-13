@@ -83,6 +83,17 @@ function persist(paneId: string, patch: SavedPaneWindow): void {
     }
 }
 
+// Everything we remember about a pane window, read in one place so the debounced
+// save, the flush-on-close and the flush-on-quit can never disagree about what
+// "remembered" means. alwaysOnTop is in here because it was being RESTORED and never
+// written — a setting that could only ever be turned on by hand-editing the config.
+function snapshot(win: BrowserWindow): SavedPaneWindow {
+    return {
+        bounds: { ...win.getNormalBounds(), maximized: false },
+        alwaysOnTop: win.isAlwaysOnTop(),
+    };
+}
+
 // setDesktopConfig is writeFileSync + renameSync. Wiring that straight to 'moved'
 // and 'resized' means a synchronous disk write for every frame of a drag — on
 // macOS, dozens per second, in the main process, where they block everything else.
@@ -107,7 +118,7 @@ function flushGeometry(win: BrowserWindow, paneId: string): void {
     const timer = saveTimers.get(paneId);
     if (timer) { clearTimeout(timer); saveTimers.delete(paneId); }
     if (win.isDestroyed()) return;
-    persist(paneId, { bounds: { ...win.getNormalBounds(), maximized: false } });
+    persist(paneId, snapshot(win));
 }
 
 // ── Adoption ────────────────────────────────────────────────────────────────
@@ -146,8 +157,7 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
     // in a crash, and the whole point of remembering geometry is that you never
     // place it twice.
     const save = (): void => {
-        persistSoon(paneId, () =>
-            win.isDestroyed() ? null : { bounds: { ...win.getNormalBounds(), maximized: false } });
+        persistSoon(paneId, () => (win.isDestroyed() ? null : snapshot(win)));
     };
     win.on('moved', save);
     win.on('resized', save);
@@ -178,6 +188,11 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
 }
 
 export function closeAllPanes(): void {
+    // destroy() does NOT fire 'close', so the flush wired to that event never runs on
+    // this path — and the debounced save may still be pending. Move a pane, quit two
+    // seconds later, and its position would be gone. Flush every pane first.
+    windows.forEach((win, paneId) => flushGeometry(win, paneId));
+
     // Called when the main window goes. A pane window holds a DOM node belonging to
     // the main window's document — with the main window gone there is nothing left
     // to dock it back into. And worse: a pane HIDDEN in the tray is still an open

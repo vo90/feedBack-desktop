@@ -47,10 +47,13 @@ let panes: TrayPane[] = [];
 let actions: TrayPaneActions | null = null;
 
 function iconPath(): string {
-    // Windows wants an .ico; macOS and Linux take a PNG. macOS additionally wants
-    // a monochrome template image, which the 16px PNG is not — so it will render
-    // in colour there. Acceptable, and preferable to shipping no tray at all;
-    // a proper …Template.png is a follow-up.
+    // Windows wants an .ico; macOS and Linux take a PNG. build:ts copies
+    // resources/icons/icon.ico -> tray.ico and resources/icons/32x32.png -> tray.png.
+    //
+    // macOS additionally wants a monochrome TEMPLATE image, which a 32px colour PNG
+    // is not — so the tray icon will render in colour there rather than adapting to
+    // light/dark menu bars. Acceptable, and far preferable to shipping no tray at
+    // all; a proper …Template.png is a follow-up.
     return path.join(__dirname, process.platform === 'win32' ? 'tray.ico' : 'tray.png');
 }
 
