@@ -18,7 +18,6 @@
 import { Menu, Tray, nativeImage, app } from 'electron';
 import * as path from 'path';
 import { IPC_PANE_EVENT_TOGGLE } from './ipc-channels';
-import { togglePaneWindow, showAllPaneWindows, hideAllPaneWindows, hasPaneWindow } from './pane-hosts';
 
 export interface TrayPane {
     id: string;
@@ -27,9 +26,25 @@ export interface TrayPane {
     open?: boolean;
 }
 
+// What the tray needs from the pane host, INJECTED rather than imported.
+//
+// pane-hosts imports setTrayPanes from this file, so importing back from there
+// would make the two modules mutually dependent — and a require cycle in the main
+// process is not a style question: whichever module loads second sees the other's
+// exports half-initialised, which fails at whatever moment the graph happens to
+// resolve in. One direction only: pane-hosts → pane-tray, and the actions come in
+// through initTray().
+export interface TrayPaneActions {
+    getMainWindow: () => Electron.BrowserWindow | null;
+    toggleWindow: (paneId: string) => boolean;
+    showAll: () => void;
+    hideAll: () => void;
+    hasWindow: (paneId: string) => boolean;
+}
+
 let tray: Tray | null = null;
 let panes: TrayPane[] = [];
-let getMainWindow: () => Electron.BrowserWindow | null = () => null;
+let actions: TrayPaneActions | null = null;
 
 function iconPath(): string {
     // Windows wants an .ico; macOS and Linux take a PNG. macOS additionally wants
@@ -40,7 +55,7 @@ function iconPath(): string {
 }
 
 function showMainWindow(): void {
-    const win = getMainWindow();
+    const win = actions?.getMainWindow() ?? null;
     if (!win || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
     win.show();
@@ -56,8 +71,8 @@ function buildMenu(): Menu {
             // If we already own a window for this pane, showing/hiding it is a
             // main-process job and instant. If we don't, only the renderer can
             // decide what opening it means (it might belong in the dock), so ask.
-            if (hasPaneWindow(p.id)) { togglePaneWindow(p.id); return; }
-            const win = getMainWindow();
+            if (actions?.hasWindow(p.id)) { actions.toggleWindow(p.id); return; }
+            const win = actions?.getMainWindow() ?? null;
             if (win && !win.isDestroyed()) win.webContents.send(IPC_PANE_EVENT_TOGGLE, { paneId: p.id });
         },
     }));
@@ -71,8 +86,8 @@ function buildMenu(): Menu {
         template.push({ label: 'Panes', enabled: false });
         template.push(...paneItems);
         template.push({ type: 'separator' });
-        template.push({ label: 'Show all panes', click: showAllPaneWindows });
-        template.push({ label: 'Hide all panes', click: hideAllPaneWindows });
+        template.push({ label: 'Show all panes', click: () => actions?.showAll() });
+        template.push({ label: 'Hide all panes', click: () => actions?.hideAll() });
     } else {
         template.push({ label: 'No panes', enabled: false });
     }
@@ -92,9 +107,9 @@ export function setTrayPanes(next: TrayPane[]): void {
     tray.setContextMenu(buildMenu());
 }
 
-export function initTray(deps: { getMainWindow: () => Electron.BrowserWindow | null }): void {
+export function initTray(deps: TrayPaneActions): void {
     if (tray) return;
-    getMainWindow = deps.getMainWindow;
+    actions = deps;
 
     const image = nativeImage.createFromPath(iconPath());
     if (image.isEmpty()) {

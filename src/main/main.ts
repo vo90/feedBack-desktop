@@ -126,7 +126,10 @@ import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
-import { initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName } from './pane-hosts';
+import {
+    initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName,
+    togglePaneWindow, showAllPaneWindows, hideAllPaneWindows, hasPaneWindow,
+} from './pane-hosts';
 import { initTray, destroyTray } from './pane-tray';
 
 // Linux: enable Chromium's PipeWire capturer feature so getUserMedia can see
@@ -1188,7 +1191,16 @@ async function startup(): Promise<void> {
     // Must come after createWindow — both reach the renderer through mainWindow,
     // and Tray requires a ready app.
     initPaneHosts({ getMainWindow: () => mainWindow });
-    initTray({ getMainWindow: () => mainWindow });
+    // The tray's pane actions are INJECTED, not imported: pane-hosts already imports
+    // pane-tray (to push the menu), and importing back would make the two modules
+    // mutually dependent — a require cycle whose loser sees half-initialised exports.
+    initTray({
+        getMainWindow: () => mainWindow,
+        toggleWindow: togglePaneWindow,
+        showAll: showAllPaneWindows,
+        hideAll: hideAllPaneWindows,
+        hasWindow: hasPaneWindow,
+    });
 
     // Install our application menu (replaces Electron's default so View →
     // Zoom In also accepts the unshifted Ctrl+= key — see app-menu.ts).

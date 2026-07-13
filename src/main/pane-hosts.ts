@@ -47,19 +47,67 @@ let getMainWindow: () => BrowserWindow | null = () => null;
 // ── Geometry ────────────────────────────────────────────────────────────────
 
 function savedFor(paneId: string): SavedPaneWindow {
-    return getDesktopConfig().paneWindows?.[paneId] ?? {};
+    const saved = getDesktopConfig().paneWindows ?? {};
+    // Own-property check: a polluted or hand-edited config would otherwise hand back
+    // a value off the prototype chain for a pane that was never saved at all.
+    return Object.prototype.hasOwnProperty.call(saved, paneId) ? saved[paneId] : {};
+}
+
+// A pane id reaches us from the RENDERER (it is the tail of the frame name a
+// window.open() supplied), and it is used as a key in the persisted map. So it is
+// untrusted input in key position: `__proto__` and friends are not ids, they are a
+// way to mutate Object.prototype from a plugin.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+function isUnsafePaneId(paneId: string): boolean {
+    return UNSAFE_KEYS.has(paneId);
 }
 
 function persist(paneId: string, patch: SavedPaneWindow): void {
+    if (isUnsafePaneId(paneId)) return;
     try {
         // setDesktopConfig merges shallowly, so paneWindows must be
         // read-modify-written or one pane's save would drop every other pane's.
-        const all = { ...(getDesktopConfig().paneWindows ?? {}) };
+        //
+        // Built on a null-prototype object: whatever is in the config file (hand
+        // edited, corrupt, or written by an older build) cannot smuggle a prototype
+        // into a map we then write keys onto.
+        const all: Record<string, SavedPaneWindow> = Object.create(null);
+        const saved = getDesktopConfig().paneWindows ?? {};
+        for (const key of Object.keys(saved)) {
+            if (!isUnsafePaneId(key)) all[key] = saved[key];
+        }
         all[paneId] = { ...(all[paneId] ?? {}), ...patch };
-        setDesktopConfig({ paneWindows: all });
+        setDesktopConfig({ paneWindows: { ...all } });
     } catch (err) {
         console.warn(`[panes] failed to persist geometry for ${paneId}:`, err);
     }
+}
+
+// setDesktopConfig is writeFileSync + renameSync. Wiring that straight to 'moved'
+// and 'resized' means a synchronous disk write for every frame of a drag — on
+// macOS, dozens per second, in the main process, where they block everything else.
+// Write once the gesture settles instead.
+const GEOMETRY_SAVE_DEBOUNCE_MS = 400;
+const saveTimers = new Map<string, NodeJS.Timeout>();
+
+function persistSoon(paneId: string, patch: () => SavedPaneWindow | null): void {
+    clearTimeout(saveTimers.get(paneId));
+    saveTimers.set(paneId, setTimeout(() => {
+        saveTimers.delete(paneId);
+        const value = patch();
+        if (value) persist(paneId, value);
+    }, GEOMETRY_SAVE_DEBOUNCE_MS));
+}
+
+// Debouncing means the last move can still be in flight when the window goes. Write
+// it out NOW, while the window is alive enough to be measured — otherwise a user who
+// nudges a pane and closes it a moment later loses the position they just chose,
+// which is exactly the thing remembered geometry exists to prevent.
+function flushGeometry(win: BrowserWindow, paneId: string): void {
+    const timer = saveTimers.get(paneId);
+    if (timer) { clearTimeout(timer); saveTimers.delete(paneId); }
+    if (win.isDestroyed()) return;
+    persist(paneId, { bounds: { ...win.getNormalBounds(), maximized: false } });
 }
 
 // ── Adoption ────────────────────────────────────────────────────────────────
@@ -98,8 +146,8 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
     // in a crash, and the whole point of remembering geometry is that you never
     // place it twice.
     const save = (): void => {
-        if (win.isDestroyed()) return;
-        persist(paneId, { bounds: { ...win.getNormalBounds(), maximized: false } });
+        persistSoon(paneId, () =>
+            win.isDestroyed() ? null : { bounds: { ...win.getNormalBounds(), maximized: false } });
     };
     win.on('moved', save);
     win.on('resized', save);
@@ -113,6 +161,10 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
         win.hide();
         refreshTray();
     });
+
+    // 'close' fires while the window still exists; 'closed' after it is gone. The
+    // final geometry can only be read from the former.
+    win.on('close', () => flushGeometry(win, paneId));
 
     win.on('closed', () => {
         windows.delete(paneId);
@@ -153,16 +205,26 @@ function refreshTray(): void {
     }));
 }
 
+// A pane is sent to the tray by MINIMIZING it and then hiding it — and hiding a
+// minimized window does not un-minimize it. So show() alone would restore a window
+// that is still minimized: present, but not on screen, which reads as the tray
+// being broken. Always restore first.
+function reveal(win: BrowserWindow): void {
+    if (win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+}
+
 export function togglePaneWindow(paneId: string): boolean {
     const win = windows.get(paneId);
     if (!win || win.isDestroyed()) return false;   // not open → only the renderer can open it
-    if (win.isVisible()) win.hide(); else win.show();
+    if (win.isVisible() && !win.isMinimized()) win.hide(); else reveal(win);
     refreshTray();
     return true;
 }
 
 export function showAllPaneWindows(): void {
-    windows.forEach((win) => { if (!win.isDestroyed() && !win.isVisible()) win.show(); });
+    windows.forEach((win) => { if (!win.isDestroyed()) reveal(win); });
     refreshTray();
 }
 
@@ -190,8 +252,4 @@ export function initPaneHosts(deps: { getMainWindow: () => BrowserWindow | null 
             : [];
         refreshTray();
     });
-}
-
-export function getMainWindowRef(): BrowserWindow | null {
-    return getMainWindow();
 }
