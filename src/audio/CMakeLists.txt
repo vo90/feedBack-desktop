@@ -7,6 +7,7 @@ set(AUDIO_SOURCES
     TonePolish.cpp
     AudioEngine.cpp
     engine/StreamSink.cpp
+    engine/BackingPlayer.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp

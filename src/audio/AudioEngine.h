@@ -5,6 +5,7 @@
 #include "engine/EngineState.h"
 #include "engine/RendererBus.h"
 #include "engine/StreamSink.h"
+#include "engine/BackingPlayer.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -223,17 +224,26 @@ public:
     // renderer exposes a per-preset toggle.
     void setTonePolishEnabled(bool enabled) { source0().setTonePolishEnabled(enabled); }
 
-    // Backing track
+    // Backing track — transport moved to engine/BackingPlayer (TLC phase 3);
+    // the volume fader + level meter stay engine-side (mix policy).
     void setBackingVolume(float vol) { backingVolume.store(slopsmith::sanitizeMasterGain(vol)); }
-    bool loadBackingTrack(const juce::File& file);
-    void setBackingPosition(double seconds);
-    void startBacking();
-    void stopBacking();
-    void setBackingSpeed(double speed);
-    // Non-blocking reads — do not acquire backingLock and never block the audio callback
-    bool isBackingPlaying() const { return backingPlaying.load(); }
-    double getBackingPosition() const { return cachedBackingPosition.load(); }
-    double getBackingDuration() const { return cachedBackingDuration.load(); }
+    bool loadBackingTrack(const juce::File& file)
+    {
+        currentBackingLevel.store(0.0f);
+        return backing.load(file);
+    }
+    void setBackingPosition(double seconds) { backing.setPosition(seconds); }
+    void startBacking() { backing.start(); }
+    void stopBacking()
+    {
+        backing.stop();
+        currentBackingLevel.store(0.0f);
+    }
+    void setBackingSpeed(double speed) { backing.setSpeed(speed); }
+    // Non-blocking reads — never acquire the backing lock / block the audio callback
+    bool isBackingPlaying() const { return backing.isPlaying(); }
+    double getBackingPosition() const { return backing.getPosition(); }
+    double getBackingDuration() const { return backing.getDuration(); }
 
     // Metering (read from any thread — atomic). Input level/peak are per-source
     // (sources[0]); output level/peak are the post-mix master, engine-global.
@@ -377,16 +387,6 @@ private:
                                           const juce::AudioIODeviceCallbackContext& context) override;
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
-    void stopBackingNoLock(); // caller holds backingLock
-
-    // Renders one block of the backing track into backingBuffer (1x bypass or
-    // phase-vocoder stretch), advances backingHeardPositionSec /
-    // cachedBackingPosition, and clears backingPlaying at EOF. Returns the
-    // number of output frames written (== jmin(numSamples, backingBuffer cap)).
-    // Shared by the duplex and split output callbacks so the two paths can't
-    // drift. Precondition: caller holds backingLock and has verified
-    // backingTransport && backingPlaying.
-    int renderBackingBlockLocked(int numSamples);
 
     // Split-mode only: drains outputRing, mixes backing, writes to device.
     void audioOutputCallback(const float* const* inputData,
@@ -478,15 +478,9 @@ private:
     // sourcesMutex (or is the device-stop path, where the callback is gone).
     void reclaimPendingReleases();
 
-    juce::AudioFormatManager formatManager;
-
     // Master output (post-mix) — engine-global, not per-source.
     std::atomic<float> outputGain{1.0f};
     std::atomic<float> backingVolume{0.8f};
-    // Per-song loudness normalizer for the backing track (applied in
-    // renderBackingBlockLocked, pre-fader). Owned + driven by the audio thread.
-    BackingLeveler backingLeveler;
-    double backingLevelerSr = 0.0;
     std::atomic<float> currentOutputLevel{0.0f};
     // Per-block RMS of the backing-track mix bus, written by the audio thread
     // and read on the main/JS thread via getBackingLevel(). Computed after the
@@ -495,38 +489,9 @@ private:
     std::atomic<float> currentBackingLevel{0.0f};
     std::atomic<float> outputPeak{0.0f};
 
-    // Backing track
-    // Read-ahead worker that fills the transport's buffer off the audio thread
-    // (see loadBackingTrack). Declared BEFORE backingTransport so it is destroyed
-    // AFTER it — the transport's BufferingAudioSource holds a pointer to this
-    // thread and must be torn down before the thread goes away.
-    juce::TimeSliceThread backingReadThread { "BackingReadAhead" };
-    std::unique_ptr<juce::AudioFormatReaderSource> backingSource;
-    std::unique_ptr<juce::AudioTransportSource> backingTransport;
-    signalsmith::stretch::SignalsmithStretch<float> backingStretch;
-    juce::AudioBuffer<float> backingInputBuffer; // pulled from transport at device rate
-    juce::AudioBuffer<float> backingBuffer; // stretch output, mixed into device buffer
-    std::atomic<int> backingStretchLatencySamples{0};
-    std::atomic<bool> backingPlaying{false};
-    std::atomic<double> cachedBackingPosition{0.0};
-    std::atomic<double> cachedBackingDuration{0.0};
-    // Heard playhead: accumulates the source frames consumed each block, then
-    // clamped to backingTransport->getCurrentPosition() so a short read at EOF
-    // can't push it past the real source point. cachedBackingPosition is this
-    // value minus the stretcher output latency (zero on the 1x bypass path).
-    std::atomic<double> backingHeardPositionSec{0.0};
-    // Active playback rate. Mutated ONLY by the audio thread (in
-    // renderBackingBlockLocked), coupled with the stretcher reset, so a block
-    // is never processed at a new rate with stale stretch state.
-    std::atomic<double> backingSpeed{1.0};
-    // Lock-free speed hand-off: setBackingSpeed (control thread) publishes the
-    // requested rate here and raises backingSpeedChangePending; the audio
-    // thread adopts it on the next block. Avoids the control thread blocking on
-    // backingLock and starving the RT tryLock (which would drop a backing block
-    // mid-slider-drag).
-    std::atomic<double> backingPendingSpeed{1.0};
-    std::atomic<bool> backingSpeedChangePending{false};
-    juce::CriticalSection backingLock;
+    // Backing track — transport/stretch/leveler moved to engine/BackingPlayer
+    // (TLC phase 3). Declared after `state` (bound by reference).
+    slopsmith::BackingPlayer backing{state};
 
     // audioRunning keeps its historical DEVICE-STATE semantics (isAudioRunning
     // compat pin); the intent half is state.userWantsAudio — see EngineState.h.
