@@ -42,12 +42,13 @@ public:
         if (was && !enabled)
         {
             // Drop buffered audio on disable so a later re-enable starts fresh
-            // instead of playing a stale tail. Consumer tolerates the jump.
-            // KNOWN ISSUE (deep-read §4, fixed in the follow-up commit): this
-            // writes readIndex from the control thread while pull() is the
-            // designated consumer-side writer.
-            ring.readIndex.store(ring.writeIndex.load(std::memory_order_acquire),
-                                 std::memory_order_release);
+            // instead of playing a stale tail. The CONSUMER honors this flag at
+            // its next pull (deep-read §4 fix): the old control-thread write to
+            // readIndex violated the ring's own SPSC discipline — a concurrent
+            // pull mid-drain could overwrite it with r + pull, replaying a
+            // stale tail after re-enable, exactly what the drop was meant to
+            // prevent. Only the consumer ever moves readIndex now.
+            flushRequested.store(true, std::memory_order_release);
             primed.store(false, std::memory_order_relaxed);
         }
     }
@@ -105,6 +106,11 @@ public:
     // call exactly once per output block.
     int pull(float* dl, float* dr, int numSamples)
     {
+        // Consume a pending flush FIRST — even while disabled — so the tail
+        // buffered before a disable is dropped by the ring's one legitimate
+        // readIndex writer (this consumer), never by the control thread.
+        if (flushRequested.exchange(false, std::memory_order_acq_rel))
+            ring.commitRead(ring.writeIndex.load(std::memory_order_acquire));
         if (!busEnabled.load(std::memory_order_acquire)) return 0;
         const uint64_t w = ring.writeIndex.load(std::memory_order_acquire);
         uint64_t r = ring.readIndex.load(std::memory_order_relaxed);
@@ -196,6 +202,9 @@ private:
     // Consumer-side prefill-gate state. Only the live output callback touches
     // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
     std::atomic<bool> primed{false};
+    // Set by setEnabled(false) on the control thread, consumed (exchange) by
+    // pull() — the drop-on-disable request, honored by the single consumer.
+    std::atomic<bool> flushRequested{false};
     // Producer-thread-only linear-resampler state (fractional read position
     // into the incoming chunk + the previous chunk's last frame for
     // interpolation continuity across pushes).

@@ -388,7 +388,15 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // stale output callback attached. stopAudio() is itself idempotent
     // (R9 fix — removeAudioCallback is a no-op when not registered), so
     // running it unconditionally is safe regardless of audioRunning.
-    const bool wasRunning = audioRunning.load(std::memory_order_relaxed);
+    // Read USER INTENT, not device state (deep-read §3 fix): audioRunning
+    // (deviceRunning) is cleared by transient audioDeviceStopped() fires —
+    // WASAPI exclusive opens routinely fire one mid-start — so a reconfigure
+    // racing that window used to see false and leave the engine configured
+    // but stopped ("no audio until Start/Apply is pressed again").
+    // userWantsAudio is written only by start/stopAudio, so it answers the
+    // question this restart decision actually asks. NOTE: stopAudio() below
+    // clears the intent flag, hence the capture BEFORE it.
+    const bool wasRunning = state.userWantsAudio.load(std::memory_order_relaxed);
 
     // stopAudio() closes every extra input device but KEEPS its desiredDeviceName;
     // the startAudio() below re-opens them at the new config (so panels using a

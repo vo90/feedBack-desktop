@@ -141,6 +141,30 @@ static void testGainApplied()
     assert(dl[0] == 2.0f && dr[0] == -2.0f);
 }
 
+// Disable drops the buffered tail — via the consumer-honored flush flag
+// (deep-read §4 fix), so a re-enable never replays stale audio.
+static void testFlushOnDisable()
+{
+    RendererBus bus;
+    bus.setEnabled(true, 1.0f);
+    const auto chunk = rampChunk(RendererBus::kPrimeFrames * 2, 5.0f, 0.0f);
+    bus.push(chunk.data(), RendererBus::kPrimeFrames * 2, 48000.0, 48000.0);
+    bus.setEnabled(false, 1.0f);   // requests the flush; consumer performs it
+    bus.setEnabled(true, 1.0f);
+    std::vector<float> dl(64), dr(64);
+    // First pull consumes the flush: the pre-disable tail is gone, so the bus
+    // is empty and (re-)priming — nothing plays.
+    assert(bus.pull(dl.data(), dr.data(), 64) == 0 && "stale tail must not replay");
+    assert(bus.metrics().fillFrames == 0 && "flush must drop the buffered tail");
+    // Fresh audio after the re-enable flows once primed.
+    const auto fresh = rampChunk(RendererBus::kPrimeFrames + 65, 7.0f, 0.0f);
+    bus.push(fresh.data(), RendererBus::kPrimeFrames + 65, 48000.0, 48000.0);
+    assert(bus.pull(dl.data(), dr.data(), 64) == 64);
+    // Frame 0 is the resampler's one-frame interpolation carry (by design);
+    // everything after must be the fresh push, not the flushed 5.0 tail.
+    assert(dl[1] == 7.0f && "post-re-enable audio must be the fresh push");
+}
+
 int main()
 {
     testEqualRateBitExact();
@@ -150,6 +174,7 @@ int main()
     testFillClampTrimsBacklog();
     testDisabledIsInert();
     testGainApplied();
+    testFlushOnDisable();
     std::puts("renderer_bus: all cases passed");
     return 0;
 }
