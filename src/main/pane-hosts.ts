@@ -170,6 +170,32 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
     win.setMinimumSize(PANE_SIZING.minWidth, PANE_SIZING.minHeight);
     if (saved.alwaysOnTop === true) win.setAlwaysOnTop(true);
 
+    // A PANE CAN NEVER GO BEHIND THE APP.
+    //
+    // A pane is a control surface for the thing you are looking at. Clicking the
+    // highway to play — the single most common thing anyone does here — raises the
+    // main window, and a plain sibling window would slide straight behind it. You
+    // would have to fish the mixer back out from behind the game every time you
+    // touched the game. That is not a pop-out, it is a hiding place.
+    //
+    // Parenting to the main window (rather than setAlwaysOnTop) is the precise
+    // amount of "in front": the pane always floats above fee[dB]ack, and behaves
+    // like any other window against everything else. Always-on-top would put it
+    // above the user's browser and editor too — a surprising thing to inflict on
+    // someone for opening a mixer.
+    //
+    // alwaysOnTop remains available on top of this for a pane the user explicitly
+    // wants above EVERYTHING; the two compose.
+    const main = getMainWindow();
+    if (main && !main.isDestroyed()) {
+        try {
+            win.setParentWindow(main);
+        } catch (err) {
+            // Not fatal: a pane that can be buried is still a working pane.
+            console.warn(`[panes] could not parent ${paneId} to the main window:`, err);
+        }
+    }
+
     // A pane is a companion to the app, not an entry to it: keep it off the taskbar
     // so it never masquerades as a second fee[dB]ack.
     win.setSkipTaskbar(true);
@@ -183,14 +209,30 @@ export function adoptPaneWindow(win: BrowserWindow, paneId: string): void {
     win.on('moved', save);
     win.on('resized', save);
 
-    // Minimize sends a pane to the tray, not the taskbar. Panes are small and
-    // numerous; a taskbar full of them is noise, and the tray already lists them.
-    // Electron's 'minimize' is not cancellable here (the listener takes no event),
-    // so we hide right after rather than preventing it — and the window is
-    // skipTaskbar, so there is no animation to see.
+    // NO MINIMIZE BUTTON. This is a safety rail, not a style choice.
+    //
+    // A pane window is skipTaskbar (it must not masquerade as a second fee[dB]ack)
+    // and, since it is parented to the main window, an OWNED window — which Windows
+    // will not give a taskbar button to in any case. So a minimized pane has no
+    // taskbar entry and no alt-tab entry. The only route back is the tray, and
+    // Windows hides new tray icons behind the overflow chevron by default.
+    //
+    // Net effect if we allow it: the user clicks minimize and the window is gone.
+    // Not hidden — gone, with no affordance anywhere on screen to bring it back.
+    // That is exactly what happened in testing, and no amount of "it's in the tray"
+    // makes it acceptable.
+    //
+    // So the button is removed. Every way of putting a pane away that remains is one
+    // the user can undo from something they can see:
+    //   - close it        → the panel returns to the app, where it came from
+    //   - the tray        → per-pane toggle, and Show/Hide all panes
+    //   - the chip's stub → in the app, dead centre of where the panel used to be
+    win.setMinimizable(false);
+
+    // Belt and braces: if something else minimizes it anyway (a window manager, a
+    // shortcut, a future code path), restore it rather than leave it unreachable.
     win.on('minimize', () => {
-        win.hide();
-        refreshTray();
+        win.restore();
     });
 
     // 'close' fires while the window still exists; 'closed' after it is gone. The
