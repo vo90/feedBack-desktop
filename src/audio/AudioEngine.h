@@ -7,6 +7,7 @@
 #include "engine/StreamSink.h"
 #include "engine/BackingPlayer.h"
 #include "engine/DeviceSetup.h"
+#include "engine/SourcePool.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -174,8 +175,7 @@ public:
     // off the control thread is race-free. Default off; see SourceChain.
     void setMonitorKill(bool kill)
     {
-        for (auto& s : sources)
-            if (s) s->setMonitorKill(kill);
+        pool.forEach([kill](SourceChain& s) { s.setMonitorKill(kill); });
     }
     bool isMonitorKilled() const { return source0().isMonitorKilled(); }
 
@@ -349,8 +349,8 @@ public:
 
 private:
     // sources[0] is the legacy default input chain; always present + active.
-    SourceChain& source0() { return *sources[0]; }
-    const SourceChain& source0() const { return *sources[0]; }
+    SourceChain& source0() { return pool.chain0(); }
+    const SourceChain& source0() const { return pool.chain0(); }
     // Input-device callback. In duplex it writes outputData directly; in split
     // it pushes processed stereo into outputRing for OutputCallback.
     void audioDeviceIOCallbackWithContext(const float* const* inputData,
@@ -409,47 +409,18 @@ private:
     // Probe/apply/teardown component (TLC phase 4). Holds references only.
     slopsmith::DeviceSetup deviceSetup{ inputDeviceManager, outputDeviceManager, state };
 
-    // Per-input capture+detect+monitor chains. A FIXED pool, all constructed up
-    // front, so adding/removing a source never reassigns a pointer the audio
-    // thread is reading — addSource/removeSource only flip an atomic `active`
-    // flag (and prepare/release the chain). sources[0] is the legacy default,
-    // active from construction and bound to the primary input device. The audio
-    // callback fans device channels out to each active source and fans their
-    // monitor signals into the output mix. SourceChain reads the engine's
-    // audioRunning / currentSampleRate atomics through references bound at
-    // construction.
-    static constexpr int kMaxSources = 8;
-    // Max ADDITIONAL input devices (beyond the primary). Declared here — ahead of the
-    // members that size arrays by it (e.g. callbacksInFlight) — though the extra-input
-    // slot registry that uses it lives further below.
-    static constexpr int kMaxExtraInputDevices = 3;
-    std::array<std::unique_ptr<SourceChain>, kMaxSources> sources;
-    // Serialises addSource/removeSource (control threads only — never the audio
-    // thread, which just reads each slot's atomic `active`).
-    std::mutex sourcesMutex;
-    // Audio-thread scratch for the multi-source mix: each active source renders
-    // its 2-channel monitor here in turn, then it is summed into the output.
-    // Pre-sized in audioDeviceAboutToStart so the hot loop never allocates.
+    // Per-input capture+detect+monitor chains + the add/remove/reclaim
+    // lifecycle + per-deviceKey quiescence handshake — moved to
+    // engine/SourcePool (TLC phase 5). Constants mirrored for the members
+    // that size arrays by them (extraInputs, and NodeAddon range checks).
+    static constexpr int kMaxSources = slopsmith::SourcePool::kMaxSources;
+    static constexpr int kMaxExtraInputDevices = slopsmith::SourcePool::kMaxExtraInputDevices;
+    slopsmith::SourcePool pool{ state };
+    // Audio-thread scratch for the multi-source mix on the PRIMARY callback:
+    // each active source renders its 2-channel monitor here in turn, then it
+    // is summed into the output. Pre-sized in audioDeviceAboutToStart so the
+    // hot loop never allocates. (Extra devices carry their own scratch.)
     juce::AudioBuffer<float> sourceMonitorScratch;
-    // Count of device callback bodies currently executing, PER deviceKey (index 0 =
-    // primary input, 1..kMaxExtraInputDevices = each extra-input slot). Each device
-    // callback increments its own key on entry and decrements at its real exit.
-    // removeSource() flips a source inactive (future callbacks snapshot active once
-    // and skip it), then waits to observe THIS SOURCE's deviceKey count == 0 — at
-    // that instant no callback that could touch this source is inside processBlock,
-    // so it is safe to release. Keying per-deviceKey (not a single global counter) is
-    // essential: with the primary + extra inputs on independent clocks they are
-    // rarely ALL idle at once, so a global check would strand removals during steady
-    // multi-device playback. A wedged callback past the bounded wait DEFERS the
-    // release via pendingRelease[], reclaimed later when that key's body is quiescent.
-    std::array<std::atomic<int>, kMaxExtraInputDevices + 1> callbacksInFlight{};
-    // Sources whose release was deferred (handshake timed out). Reclaimed under
-    // sourcesMutex by reclaimPendingReleases() at the next add/removeSource and on
-    // device stop, once it is safe (audio stopped or no callback in flight).
-    std::array<bool, kMaxSources> pendingRelease{};
-    // Release any deferred sources that are now safe to reclaim. Caller holds
-    // sourcesMutex (or is the device-stop path, where the callback is gone).
-    void reclaimPendingReleases();
 
     // Master output (post-mix) — engine-global, not per-source.
     std::atomic<float> outputGain{1.0f};
@@ -584,13 +555,7 @@ private:
     bool closeExtraInputDevice(int slot);
     void reopenDesiredExtraInputs();
 
-    // Shared fan-out used by both the primary and each extra device's callback:
-    // mix every active source bound to `deviceKey` into `mixBuf` (using the
-    // caller-owned `monitorScratch` for the N>1 render so concurrent device
-    // threads never share scratch). Returns the active source count for that key.
-    int mixSourcesForDevice(int deviceKey, const float* const* inputData, int numInputChannels,
-                            juce::AudioBuffer<float>& mixBuf, juce::AudioBuffer<float>& monitorScratch,
-                            int effectiveOutputChannels, int numSamples);
+    // (mixSourcesForDevice moved to SourcePool::mixForDevice — TLC phase 5.)
 
     // ── Streamer mix output sink — moved to engine/StreamSink.{h,cpp} (TLC
     // phase 2). Declared after `state` (bound by reference).
