@@ -200,18 +200,26 @@ test('audio-effects executor owns load mute, route gain, start, and release', as
     assert.equal(gained.outcome, 'handled');
     assert.equal(released.outcome, 'handled');
     assert.equal(inspected.outcome, 'no-target');
-    assert.deepEqual(calls.slice(0, 7), [
-        ['is-muted'],
+    // Monitor-mute arbiter (TLC Part II §2): the executor never reads or
+    // writes the user's mute preference — it acquires a suppression for the
+    // dry-during-load window (default) and releases exactly what it acquired.
+    assert.deepEqual(calls.slice(0, 6), [
         ['gain', 'chain', 0],
-        ['monitor', false],
+        ['suppress', true],
         ['load', 2],
         ['gain', 'input', 8],
         ['start'],
         ['gain', 'chain', 2],
     ]);
     assert.equal(calls.some(call => call[0] === 'clear'), true);
-    assert.equal(calls.some(call => call[0] === 'monitor' && call[1] === true), true);
-    assert.equal(calls.some(call => call[0] === 'suppress' && call[1] === false), true);
+    // The preference API is untouched, in both directions — releaseRoute no
+    // longer forces monitorMute=true over the user's persisted choice.
+    assert.equal(calls.some(call => call[0] === 'is-muted'), false);
+    assert.equal(calls.some(call => call[0] === 'monitor'), false);
+    // The suppression is balanced: one acquire, one release — never an
+    // unpaired clear that would cancel another writer's window.
+    assert.equal(calls.filter(call => call[0] === 'suppress' && call[1] === true).length, 1);
+    assert.equal(calls.filter(call => call[0] === 'suppress' && call[1] === false).length, 1);
     assert.equal(calls.some(call => call[0] === 'gain' && call[1] === 'chain' && call[2] === 4), false);
     assert.equal(calls.some(call => call[0] === 'gain' && call[1] === 'chain' && call[2] === 0), true);
 });
@@ -368,8 +376,11 @@ test('audio-effects executor rejects coerced parameter indices', async () => {
 });
 
 test('preload exposes the trusted audio-effects executor surface', () => {
-    const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.ts'), 'utf8');
-    const bridge = fs.readFileSync(path.join(ROOT, 'src', 'main', 'audio-bridge.ts'), 'utf8');
+    // Normalize line endings: the multi-line snippet assertion below uses
+    // \n, but a Windows checkout with core.autocrlf reads these files as
+    // \r\n — the test must not depend on the developer's git config.
+    const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.ts'), 'utf8').replace(/\r\n/g, '\n');
+    const bridge = fs.readFileSync(path.join(ROOT, 'src', 'main', 'audio-bridge.ts'), 'utf8').replace(/\r\n/g, '\n');
 
     assert.equal(preload.includes('audioEffects: {'), true);
     for (const method of ['loadChainPlan', 'releaseRoute', 'inspectRoute', 'activateSegment', 'setStageBypass', 'setStageParameter', 'setRouteGain']) {
@@ -389,4 +400,52 @@ test('preload exposes the trusted audio-effects executor surface', () => {
     assert.equal(bridge.includes("ipcMain.handle('audio-effects:loadChainPlan', async"), true);
     assert.equal(bridge.includes('vstSlotPaths.clear();\n        return await audioEffects.loadChainPlan(request);'), true);
     assert.equal(bridge.includes('if (normalizedPayload.inputType !== normalizedPayload.outputType)'), true);
+});
+
+test('audio-effects executor detects a foreign chain write via chainGeneration and reports a stale route', async () => {
+    const { createAudioEffectsExecutor } = loadExecutorModule();
+    // Native stub with the phase-7a generation counter: our load lands at
+    // generation 5; a foreign writer (legacy loadPreset / clearChain) later
+    // bumps it to 6, invalidating the route's stageSlots map.
+    let generation = 5;
+    const bypassCalls = [];
+    const native = {
+        loadPreset: async presetJson => ({ success: true, slotsLoaded: JSON.parse(presetJson).chain.length, chainGeneration: generation }),
+        getChainState: () => [{ id: 10 }, { id: 11 }],
+        getChainGeneration: () => generation,
+        setBypass: (slotId, bypassed) => { bypassCalls.push([slotId, bypassed]); return true; },
+        setMultiBypass: changes => { bypassCalls.push(['multi', changes]); return true; },
+        setParameter: () => true,
+    };
+    const executor = createAudioEffectsExecutor(() => native);
+    const loaded = await executor.loadChainPlan({
+        authorization: 'playback-session',
+        plan: plan(),
+        assets: {
+            'asset:pre': { kind: 'nam', path: tempAsset('.nam'), safeName: 'pre' },
+            'asset:cab': { kind: 'ir', path: tempAsset('.wav'), safeName: 'cab' },
+        },
+    });
+    assert.equal(loaded.outcome, 'handled');
+
+    // Generation unchanged: stage ops flow normally.
+    const fresh = await executor.setStageBypass({ routeKey: 'desktop-main', stageId: 'pre', bypassed: true });
+    assert.equal(fresh.outcome, 'handled');
+    assert.equal(bypassCalls.length, 1);
+
+    // Foreign write bumps the native counter.
+    generation = 6;
+    const stale = await executor.setStageBypass({ routeKey: 'desktop-main', stageId: 'pre', bypassed: false });
+    assert.equal(stale.outcome, 'no-target');
+    assert.match(stale.reason, /modified by another writer/);
+    assert.equal(stale.payload.expectedGeneration, 5);
+    assert.equal(stale.payload.currentGeneration, 6);
+    assert.equal(bypassCalls.length, 1, 'stale route must NOT touch native slots');
+
+    // Segment activation and parameters are equally guarded.
+    const seg = await executor.activateSegment({ routeKey: 'desktop-main', segmentId: 'lead' });
+    assert.equal(seg.outcome, 'no-target');
+    const param = await executor.setStageParameter({ routeKey: 'desktop-main', stageId: 'pre', paramIndex: 0, value: 0.5 });
+    assert.equal(param.outcome, 'no-target');
+    assert.equal(bypassCalls.length, 1);
 });

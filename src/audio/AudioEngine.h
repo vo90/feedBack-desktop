@@ -1,5 +1,14 @@
 #pragma once
 #include "SourceChain.h"
+#include "GainSanitize.h"
+#include "engine/PackedStereoRing.h"
+#include "engine/EngineState.h"
+#include "engine/RendererBus.h"
+#include "engine/StreamSink.h"
+#include "engine/BackingPlayer.h"
+#include "engine/DeviceSetup.h"
+#include "engine/SourcePool.h"
+#include "engine/ExtraInputs.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -62,39 +71,12 @@ public:
         juce::StringArray inputDevices;
         juce::StringArray outputDevices;
     };
-    struct DeviceOptions
-    {
-        juce::String type;          // legacy alias = inputType
-        juce::String inputType;
-        juce::String outputType;
-        juce::String input;
-        juce::String output;
-        juce::StringArray inputChannels;
-        juce::StringArray outputChannels;
-        juce::Array<double> sampleRates;   // intersection when dual-type
-        juce::Array<int> bufferSizes;
-        bool compatible = true;     // false when types share no usable sample rate
-        juce::String error;
-    };
-
-    struct DeviceConfig
-    {
-        juce::String inputType;
-        juce::String inputDevice;
-        juce::String outputType;
-        juce::String outputDevice;
-        double sampleRate = 48000.0;
-        int bufferSize = 256;
-    };
-    struct DeviceConfigResult
-    {
-        bool ok = false;
-        juce::String error;
-        double sampleRate = 0.0;
-        int inputBlockSize = 0;
-        int outputBlockSize = 0;
-        bool duplex = true;
-    };
+    // Device-config shapes moved to engine/DeviceSetup.h (TLC phase 4);
+    // aliased so the AudioEngine::DeviceOptions etc. spelling NodeAddon uses
+    // is unchanged.
+    using DeviceOptions = slopsmith::DeviceOptions;
+    using DeviceConfig = slopsmith::DeviceConfig;
+    using DeviceConfigResult = slopsmith::DeviceConfigResult;
 
     struct DeviceMetrics
     {
@@ -115,7 +97,7 @@ public:
     // with an ALSA primary), minus the device already open as the primary (that's
     // "Main") and minus monitor/loopback pseudo-inputs. Keeps the per-panel device
     // picker to a compatible, sensible set instead of every capture node.
-    struct BindableInput { juce::String typeName; juce::String name; };
+    using BindableInput = slopsmith::ExtraInputs::Bindable;
     std::vector<BindableInput> getBindableInputDevices();
 
     juce::Array<double> getSampleRates();
@@ -154,7 +136,10 @@ public:
     // Gain controls. Input + chain-output gain are per-source (sources[0]);
     // output gain is the post-mix master and stays engine-global.
     void setInputGain(float gain) { source0().setInputGain(gain); }
-    void setOutputGain(float gain) { outputGain.store(gain); }
+    // Sanitized (see GainSanitize.h): a NaN/Inf master gain from JS would
+    // multiply the whole device output to NaN downstream of the per-source
+    // scrub — clamp at the store so every caller is covered.
+    void setOutputGain(float gain) { outputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getInputGain() const { return source0().getInputGain(); }
     float getOutputGain() const { return outputGain.load(); }
 
@@ -180,6 +165,11 @@ public:
     // so the brief empty-chain window doesn't silence the player's guitar.
     void setMonitorMuteSuppressed(bool suppressed) { source0().setMonitorMuteSuppressed(suppressed); }
     bool isMonitorMuteSuppressed() const { return source0().isMonitorMuteSuppressed(); }
+    // Refcounted force-mute overrides (see SourceChain's arbiter comment).
+    void acquireMonitorMuteHold() { source0().acquireMonitorMuteHold(); }
+    void releaseMonitorMuteHold() { source0().releaseMonitorMuteHold(); }
+    int getMonitorMuteHoldCount() const { return source0().getMonitorMuteHoldCount(); }
+    int getMonitorMuteSuppressCount() const { return source0().getMonitorMuteSuppressCount(); }
 
     // Full monitor kill — silences the guitar bus entirely (dry + processed),
     // for monitoring through an external rig. Unlike the per-source mute/gain
@@ -191,8 +181,7 @@ public:
     // off the control thread is race-free. Default off; see SourceChain.
     void setMonitorKill(bool kill)
     {
-        for (auto& s : sources)
-            if (s) s->setMonitorKill(kill);
+        pool.forEach([kill](SourceChain& s) { s.setMonitorKill(kill); });
     }
     bool isMonitorKilled() const { return source0().isMonitorKilled(); }
 
@@ -215,17 +204,26 @@ public:
     // renderer exposes a per-preset toggle.
     void setTonePolishEnabled(bool enabled) { source0().setTonePolishEnabled(enabled); }
 
-    // Backing track
-    void setBackingVolume(float vol) { backingVolume.store(vol); }
-    bool loadBackingTrack(const juce::File& file);
-    void setBackingPosition(double seconds);
-    void startBacking();
-    void stopBacking();
-    void setBackingSpeed(double speed);
-    // Non-blocking reads — do not acquire backingLock and never block the audio callback
-    bool isBackingPlaying() const { return backingPlaying.load(); }
-    double getBackingPosition() const { return cachedBackingPosition.load(); }
-    double getBackingDuration() const { return cachedBackingDuration.load(); }
+    // Backing track — transport moved to engine/BackingPlayer (TLC phase 3);
+    // the volume fader + level meter stay engine-side (mix policy).
+    void setBackingVolume(float vol) { backingVolume.store(slopsmith::sanitizeMasterGain(vol)); }
+    bool loadBackingTrack(const juce::File& file)
+    {
+        currentBackingLevel.store(0.0f);
+        return backing.load(file);
+    }
+    void setBackingPosition(double seconds) { backing.setPosition(seconds); }
+    void startBacking() { backing.start(); }
+    void stopBacking()
+    {
+        backing.stop();
+        currentBackingLevel.store(0.0f);
+    }
+    void setBackingSpeed(double speed) { backing.setSpeed(speed); }
+    // Non-blocking reads — never acquire the backing lock / block the audio callback
+    bool isBackingPlaying() const { return backing.isPlaying(); }
+    double getBackingPosition() const { return backing.getPosition(); }
+    double getBackingDuration() const { return backing.getDuration(); }
 
     // Metering (read from any thread — atomic). Input level/peak are per-source
     // (sources[0]); output level/peak are the post-mix master, engine-global.
@@ -245,18 +243,13 @@ public:
     // setStreamOutputDevice returns "" on success or an error string.
     juce::String setStreamOutputDevice(const juce::String& typeName, const juce::String& deviceName);
     void clearStreamOutput();
-    bool isStreamOutputActive() const { return streamSink.active.load(std::memory_order_acquire); }
-    juce::String getStreamOutputDeviceName() const { return streamSink.desiredDeviceName; }
+    bool isStreamOutputActive() const { return streamSink.isActive(); }
+    juce::String getStreamOutputDeviceName() const { return streamSink.getDesiredDeviceName(); }
     // Bus content: include the backing/game, include the guitar monitor mix, and a
     // linear output gain. All atomic — safe to set live. Gain is sanitised
     // (finite, clamped 0..8) so a NaN/Inf from JS can never reach the stream ring.
-    void setStreamBus(bool includeBacking, bool includeGuitar, float gain)
-    {
-        streamBusIncludeBacking.store(includeBacking, std::memory_order_relaxed);
-        streamBusIncludeGuitar.store(includeGuitar, std::memory_order_relaxed);
-        streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
-    }
-    void setStreamBusGain(float gain) { streamBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed); }
+    void setStreamBus(bool includeBacking, bool includeGuitar, float gain) { streamSink.setBus(includeBacking, includeGuitar, gain); }
+    void setStreamBusGain(float gain) { streamSink.setBusGain(gain); }
 
     // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ─────────
     // The renderer pushes its WebAudio master mix here (via IPC) so song/stem
@@ -264,20 +257,7 @@ public:
     // mixer path is silenced. SPSC: producer is the main-process IPC thread,
     // consumer is whichever output callback is live (duplex or split). Default
     // off → zero behaviour change.
-    void setRendererBus(bool enabled, float gain)
-    {
-        rendererBusGain.store(sanitizeStreamGain(gain), std::memory_order_relaxed);
-        const bool was = rendererBusEnabled.exchange(enabled, std::memory_order_acq_rel);
-        if (was && !enabled)
-        {
-            // Drop buffered audio on disable so a later re-enable starts fresh
-            // instead of playing a stale tail. Consumer tolerates the jump.
-            rendererBusReadIndex.store(
-                rendererBusWriteIndex.load(std::memory_order_acquire),
-                std::memory_order_release);
-            rendererBusPrimed.store(false, std::memory_order_relaxed);
-        }
-    }
+    void setRendererBus(bool enabled, float gain) { rendererBus.setEnabled(enabled, gain); }
     // Interleaved stereo frames at `sourceRate`; linear-resampled to the device
     // rate on the producer thread (fractional position + previous frame carried
     // across calls). Returns false when the bus is disabled or the engine is
@@ -291,14 +271,33 @@ public:
     };
     RendererBusMetrics getRendererBusMetrics() const;
 
-    float getStreamSinkLevel() const { return streamSinkLevel.load(std::memory_order_relaxed); }
-    uint64_t getStreamUnderflowCount() const { return streamSink.underflowCount.load(std::memory_order_relaxed); }
+    float getStreamSinkLevel() const { return streamSink.getLevel(); }
+    uint64_t getStreamUnderflowCount() const { return streamSink.getUnderflowCount(); }
     // Producer overflow (drop-oldest): the consumer fell a full ring behind and
     // frames were skipped. Exposed alongside underflow for stream drift diagnosis.
-    uint64_t getStreamOverflowCount() const { return streamSink.overflowCount.load(std::memory_order_relaxed); }
+    uint64_t getStreamOverflowCount() const { return streamSink.getOverflowCount(); }
 
     // Latency
     double getLatencyMs() const;
+
+    // One owner for every latency term (TLC deep-read §5) — the previous
+    // three unreconciled truths were getLatencyMs' static half-capacity ring
+    // guess, the verifier's input-latency-delta-only offset, and the renderer
+    // bus adding prime+fill+resample that no figure surfaced. All ms.
+    struct LatencyBreakdown
+    {
+        double sampleRate = 0.0;
+        bool duplex = true;
+        double deviceBufferMs = 0.0;     // input buffer (+ output buffer when split)
+        double inputLatencyMs = 0.0;     // driver-reported capture latency
+        double outputLatencyMs = 0.0;    // driver-reported playback latency
+        double splitRingMs = 0.0;        // MEASURED primary-ring residency (0 in duplex)
+        double monitorTotalMs = 0.0;     // guitar in→out: buffers + in/out + splitRing
+        // Renderer-bus song-audio delay: measured bus fill (includes the
+        // ~10.7 ms prime cushion once flowing). 0 when the bus is off.
+        double rendererBusMs = 0.0;
+    };
+    LatencyBreakdown getLatencyBreakdown() const;
 
     // Raw input frame snapshot for renderer-side polyphonic chord scoring in
     // notedetect. Backed by sources[0]'s pre-gate input ring; the rings (and the
@@ -375,10 +374,10 @@ public:
 
 private:
     // sources[0] is the legacy default input chain; always present + active.
-    SourceChain& source0() { return *sources[0]; }
-    const SourceChain& source0() const { return *sources[0]; }
+    SourceChain& source0() { return pool.chain0(); }
+    const SourceChain& source0() const { return pool.chain0(); }
     // Input-device callback. In duplex it writes outputData directly; in split
-    // it pushes processed stereo into outputPendingRing for OutputCallback.
+    // it pushes processed stereo into outputRing for OutputCallback.
     void audioDeviceIOCallbackWithContext(const float* const* inputData,
                                           int numInputChannels,
                                           float* const* outputData,
@@ -387,18 +386,8 @@ private:
                                           const juce::AudioIODeviceCallbackContext& context) override;
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
-    void stopBackingNoLock(); // caller holds backingLock
 
-    // Renders one block of the backing track into backingBuffer (1x bypass or
-    // phase-vocoder stretch), advances backingHeardPositionSec /
-    // cachedBackingPosition, and clears backingPlaying at EOF. Returns the
-    // number of output frames written (== jmin(numSamples, backingBuffer cap)).
-    // Shared by the duplex and split output callbacks so the two paths can't
-    // drift. Precondition: caller holds backingLock and has verified
-    // backingTransport && backingPlaying.
-    int renderBackingBlockLocked(int numSamples);
-
-    // Split-mode only: drains outputPendingRing, mixes backing, writes to device.
+    // Split-mode only: drains outputRing, mixes backing, writes to device.
     void audioOutputCallback(const float* const* inputData,
                              int numInputChannels,
                              float* const* outputData,
@@ -427,11 +416,8 @@ private:
     };
     OutputCallback outputCallback{ *this };
 
-    juce::String applyDuplexSetup(const juce::String& inputName,
-                                  const juce::String& outputName,
-                                  double sampleRate,
-                                  int bufferSize);
-    DeviceConfigResult applySplitSetup(const DeviceConfig& config);
+    // Probe/apply/teardown moved to engine/DeviceSetup (TLC phase 4);
+    // setAudioDevices stays here as the orchestrator.
     void teardownSplitMode();
 
     // Duplex mode: inputDeviceManager owns both directions, outputDeviceManager idle.
@@ -439,59 +425,31 @@ private:
     // with an SPSC ring between them.
     juce::AudioDeviceManager inputDeviceManager;
     juce::AudioDeviceManager outputDeviceManager;
-    std::atomic<bool> duplexMode{true};
 
-    // Per-input capture+detect+monitor chains. A FIXED pool, all constructed up
-    // front, so adding/removing a source never reassigns a pointer the audio
-    // thread is reading — addSource/removeSource only flip an atomic `active`
-    // flag (and prepare/release the chain). sources[0] is the legacy default,
-    // active from construction and bound to the primary input device. The audio
-    // callback fans device channels out to each active source and fans their
-    // monitor signals into the output mix. SourceChain reads the engine's
-    // audioRunning / currentSampleRate atomics through references bound at
-    // construction.
-    static constexpr int kMaxSources = 8;
-    // Max ADDITIONAL input devices (beyond the primary). Declared here — ahead of the
-    // members that size arrays by it (e.g. callbacksInFlight) — though the extra-input
-    // slot registry that uses it lives further below.
-    static constexpr int kMaxExtraInputDevices = 3;
-    std::array<std::unique_ptr<SourceChain>, kMaxSources> sources;
-    // Serialises addSource/removeSource (control threads only — never the audio
-    // thread, which just reads each slot's atomic `active`).
-    std::mutex sourcesMutex;
-    // Audio-thread scratch for the multi-source mix: each active source renders
-    // its 2-channel monitor here in turn, then it is summed into the output.
-    // Pre-sized in audioDeviceAboutToStart so the hot loop never allocates.
+    // Shared run-state atomics (TLC phase 1) — the members below are
+    // reference aliases under their historical names so call sites are
+    // untouched; extracted units take `state` (EngineState&) directly.
+    slopsmith::EngineState state;
+    std::atomic<bool>& duplexMode = state.duplexMode;
+    // Probe/apply/teardown component (TLC phase 4). Holds references only.
+    slopsmith::DeviceSetup deviceSetup{ inputDeviceManager, outputDeviceManager, state };
+
+    // Per-input capture+detect+monitor chains + the add/remove/reclaim
+    // lifecycle + per-deviceKey quiescence handshake — moved to
+    // engine/SourcePool (TLC phase 5). Constants mirrored for the members
+    // that size arrays by them (extraInputs, and NodeAddon range checks).
+    static constexpr int kMaxSources = slopsmith::SourcePool::kMaxSources;
+    static constexpr int kMaxExtraInputDevices = slopsmith::SourcePool::kMaxExtraInputDevices;
+    slopsmith::SourcePool pool{ state };
+    // Audio-thread scratch for the multi-source mix on the PRIMARY callback:
+    // each active source renders its 2-channel monitor here in turn, then it
+    // is summed into the output. Pre-sized in audioDeviceAboutToStart so the
+    // hot loop never allocates. (Extra devices carry their own scratch.)
     juce::AudioBuffer<float> sourceMonitorScratch;
-    // Count of device callback bodies currently executing, PER deviceKey (index 0 =
-    // primary input, 1..kMaxExtraInputDevices = each extra-input slot). Each device
-    // callback increments its own key on entry and decrements at its real exit.
-    // removeSource() flips a source inactive (future callbacks snapshot active once
-    // and skip it), then waits to observe THIS SOURCE's deviceKey count == 0 — at
-    // that instant no callback that could touch this source is inside processBlock,
-    // so it is safe to release. Keying per-deviceKey (not a single global counter) is
-    // essential: with the primary + extra inputs on independent clocks they are
-    // rarely ALL idle at once, so a global check would strand removals during steady
-    // multi-device playback. A wedged callback past the bounded wait DEFERS the
-    // release via pendingRelease[], reclaimed later when that key's body is quiescent.
-    std::array<std::atomic<int>, kMaxExtraInputDevices + 1> callbacksInFlight{};
-    // Sources whose release was deferred (handshake timed out). Reclaimed under
-    // sourcesMutex by reclaimPendingReleases() at the next add/removeSource and on
-    // device stop, once it is safe (audio stopped or no callback in flight).
-    std::array<bool, kMaxSources> pendingRelease{};
-    // Release any deferred sources that are now safe to reclaim. Caller holds
-    // sourcesMutex (or is the device-stop path, where the callback is gone).
-    void reclaimPendingReleases();
-
-    juce::AudioFormatManager formatManager;
 
     // Master output (post-mix) — engine-global, not per-source.
     std::atomic<float> outputGain{1.0f};
     std::atomic<float> backingVolume{0.8f};
-    // Per-song loudness normalizer for the backing track (applied in
-    // renderBackingBlockLocked, pre-fader). Owned + driven by the audio thread.
-    BackingLeveler backingLeveler;
-    double backingLevelerSr = 0.0;
     std::atomic<float> currentOutputLevel{0.0f};
     // Per-block RMS of the backing-track mix bus, written by the audio thread
     // and read on the main/JS thread via getBackingLevel(). Computed after the
@@ -500,127 +458,31 @@ private:
     std::atomic<float> currentBackingLevel{0.0f};
     std::atomic<float> outputPeak{0.0f};
 
-    // Backing track
-    // Read-ahead worker that fills the transport's buffer off the audio thread
-    // (see loadBackingTrack). Declared BEFORE backingTransport so it is destroyed
-    // AFTER it — the transport's BufferingAudioSource holds a pointer to this
-    // thread and must be torn down before the thread goes away.
-    juce::TimeSliceThread backingReadThread { "BackingReadAhead" };
-    std::unique_ptr<juce::AudioFormatReaderSource> backingSource;
-    std::unique_ptr<juce::AudioTransportSource> backingTransport;
-    signalsmith::stretch::SignalsmithStretch<float> backingStretch;
-    juce::AudioBuffer<float> backingInputBuffer; // pulled from transport at device rate
-    juce::AudioBuffer<float> backingBuffer; // stretch output, mixed into device buffer
-    std::atomic<int> backingStretchLatencySamples{0};
-    std::atomic<bool> backingPlaying{false};
-    std::atomic<double> cachedBackingPosition{0.0};
-    std::atomic<double> cachedBackingDuration{0.0};
-    // Heard playhead: accumulates the source frames consumed each block, then
-    // clamped to backingTransport->getCurrentPosition() so a short read at EOF
-    // can't push it past the real source point. cachedBackingPosition is this
-    // value minus the stretcher output latency (zero on the 1x bypass path).
-    std::atomic<double> backingHeardPositionSec{0.0};
-    // Active playback rate. Mutated ONLY by the audio thread (in
-    // renderBackingBlockLocked), coupled with the stretcher reset, so a block
-    // is never processed at a new rate with stale stretch state.
-    std::atomic<double> backingSpeed{1.0};
-    // Lock-free speed hand-off: setBackingSpeed (control thread) publishes the
-    // requested rate here and raises backingSpeedChangePending; the audio
-    // thread adopts it on the next block. Avoids the control thread blocking on
-    // backingLock and starving the RT tryLock (which would drop a backing block
-    // mid-slider-drag).
-    std::atomic<double> backingPendingSpeed{1.0};
-    std::atomic<bool> backingSpeedChangePending{false};
-    juce::CriticalSection backingLock;
+    // Backing track — transport/stretch/leveler moved to engine/BackingPlayer
+    // (TLC phase 3). Declared after `state` (bound by reference).
+    slopsmith::BackingPlayer backing{state};
 
-    // Toggled from startAudio()/stopAudio() (main / device-management
-    // threads) and read from isAudioRunning() on the JS thread via the
-    // audio-bridge dispatch loop. Plain bool would be a data race;
-    // relaxed-atomic is well-defined and compiles to a plain MOV.
-    std::atomic<bool> audioRunning{false};
-    // Sample rate is written from the JUCE device callbacks (audio
-    // thread / device-management thread) and read from arbitrary
-    // callers including the JS thread via getCurrentSampleRate(),
-    // so a plain double would be a C++ data race. std::atomic<double>
-    // is well-defined and lock-free on the platforms we ship; the
-    // hot reads use relaxed since the consumer just wants the latest
-    // observable value, not a synchronization point.
-    std::atomic<double> currentSampleRate{48000.0};
-    // Split mode allows different input vs output block sizes; the ring absorbs
-    // the asymmetry. DSP prepares against input; backing resampler against output.
-    std::atomic<int> inputBlockSize{256};
-    std::atomic<int> outputBlockSize{256};
+    // audioRunning keeps its historical DEVICE-STATE semantics (isAudioRunning
+    // compat pin); the intent half is state.userWantsAudio — see EngineState.h.
+    std::atomic<bool>& audioRunning = state.deviceRunning;
+    std::atomic<double>& currentSampleRate = state.currentSampleRate;
+    std::atomic<int>& inputBlockSize = state.inputBlockSize;
+    std::atomic<int>& outputBlockSize = state.outputBlockSize;
 
     // The per-input lock-free SPSC rings (pre-gate getInputFrame ring + post-gate
     // getRawAudioFrame ring), the YIN/ML detectors, and the zero-output capture
     // scratch now live on SourceChain — one set per input source. See
     // SourceChain.h for the full lock-free / power-of-two / cold-start rationale.
 
-    // Split-mode SPSC ring (unused in duplex). Each slot packs one stereo frame
-    // (L+R floats) into a single 64-bit atomic so the consumer reads both
-    // channels in one indivisible load — without packing, the producer's two
-    // separate atomic stores could interleave with the consumer's two loads
-    // during a drop-oldest wrap, surfacing as L_new+R_old (or vice versa)
-    // sample tears. ~85 ms @ 48 kHz — absorbs clock drift over typical sessions.
+    // Split-mode SPSC ring (unused in duplex). Packed-LR single-atomic frames
+    // — see engine/PackedStereoRing.h for the tear/lock-free rationale (moved
+    // there in TLC phase 1). ~85 ms @ 48 kHz — absorbs clock drift over
+    // typical sessions.
     static constexpr int kOutputRingFrames = 4096;
-    std::array<std::atomic<uint64_t>, kOutputRingFrames> outputPendingRing{};
-    static_assert((kOutputRingFrames & (kOutputRingFrames - 1)) == 0,
-                  "kOutputRingFrames must be a power of two for mask wraparound");
-    // RT-thread reads + writes touch these slots, so a lock-based fallback
-    // would risk priority inversion + audible dropouts. On the platforms we
-    // ship (x86_64 + arm64 across Linux/macOS/Windows) atomic<uint64_t> is
-    // always lock-free; this assert turns a regression into a build error
-    // instead of a silent latency degradation if a future platform port
-    // breaks the assumption.
-    static_assert(std::atomic<uint64_t>::is_always_lock_free,
-                  "outputPendingRing requires lock-free atomic<uint64_t> for RT safety");
-    static_assert(sizeof(float) == 4,
-                  "outputPendingRing pack/unpack assumes 32-bit float");
+    slopsmith::PackedStereoRing<kOutputRingFrames> outputRing;
 
-    // Pack/unpack helpers — std::bit_cast (C++20) is constexpr + alias-safe.
-    static inline uint64_t packLR(float l, float r) noexcept
-    {
-        const uint32_t li = std::bit_cast<uint32_t>(l);
-        const uint32_t ri = std::bit_cast<uint32_t>(r);
-        return (static_cast<uint64_t>(ri) << 32) | static_cast<uint64_t>(li);
-    }
-    static inline void unpackLR(uint64_t v, float& l, float& r) noexcept
-    {
-        l = std::bit_cast<float>(static_cast<uint32_t>(v & 0xFFFFFFFFu));
-        r = std::bit_cast<float>(static_cast<uint32_t>(v >> 32));
-    }
-
-    // ── Renderer-audio bus ring (see setRendererBus/pushRendererAudio) ───────
-    // Same packed-LR SPSC design as outputPendingRing. Sized generously
-    // (~1.5 s @ 48 kHz — vs outputPendingRing's 85 ms) because the producer is
-    // an IPC thread with scheduling jitter, not another audio callback; the
-    // consumer trims steady-state fill via the drift clamp in the mix step.
-    static constexpr int kRendererBusFrames = 65536;
-    static_assert((kRendererBusFrames & (kRendererBusFrames - 1)) == 0,
-                  "kRendererBusFrames must be a power of two for mask wraparound");
-    // Prefill gate: consume nothing until the producer has built this cushion
-    // (~10.7 ms @ 48 kHz); re-armed after every underflow so stall recovery is
-    // one clean gap. Fill clamp: fill beyond this (~85 ms) means a renderer
-    // stall dumped a backlog — trim to the prime target, don't play the tail.
-    static constexpr int kRendererBusPrimeFrames   = 512;
-    static constexpr int kRendererBusMaxFillFrames = 4096;
-    std::array<std::atomic<uint64_t>, kRendererBusFrames> rendererBusRing{};
-    std::atomic<uint64_t> rendererBusWriteIndex{0};
-    std::atomic<uint64_t> rendererBusReadIndex{0};
-    std::atomic<uint64_t> rendererBusPushedFrames{0};
-    std::atomic<uint64_t> rendererBusConsumedFrames{0};
-    std::atomic<uint64_t> rendererBusUnderflowCount{0};
-    std::atomic<uint64_t> rendererBusOverflowCount{0};
-    std::atomic<bool>  rendererBusEnabled{false};
-    std::atomic<float> rendererBusGain{1.0f};
-    // Consumer-side prefill-gate state. Only the live output callback touches
-    // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
-    std::atomic<bool>  rendererBusPrimed{false};
-    // Producer-thread-only linear-resampler state (fractional read position
-    // into the incoming chunk + the previous chunk's last frame for
-    // interpolation continuity across pushes).
-    double rendererBusSrcPos = 0.0;
-    float  rendererBusPrevL = 0.0f, rendererBusPrevR = 0.0f;
+    // ── Renderer-audio bus (see engine/RendererBus.h — moved in TLC phase 2)
+    slopsmith::RendererBus rendererBus;
     // Shared consumer step for the duplex and split output paths: drain one
     // block from the renderer-bus ring into `dest` (stereo, bus gain applied,
     // dest cleared first). Returns numSamples on success, 0 when gated
@@ -633,8 +495,6 @@ private:
     // in about-to-start next to the stream scratches (same no-realloc rule).
     juce::AudioBuffer<float> rendererBusPullScratch;
 
-    std::atomic<uint64_t> outputRingWriteIndex{0};
-    std::atomic<uint64_t> outputRingReadIndex{0};
     std::atomic<uint64_t> outputUnderflowCount{0};
     std::atomic<uint64_t> inputOverflowCount{0};
 
@@ -650,170 +510,24 @@ private:
     // leave a live registration behind after stopAudio()'s single remove.
     bool inputCallbackRegistered = false;
 
-    // ── Phase 2: additional input devices ────────────────────────────────────
-    // Each ADDITIONAL physical input device (a 2nd/3rd USB interface, e.g. two
-    // separate cables) gets its own AudioDeviceManager + callback running on its
-    // OWN hardware clock, packing its sources' mixed monitor into its own SPSC
-    // ring. audioOutputCallback drains+sums every active ring (drop-oldest wrap
-    // absorbs each device's drift independently — no cross-device resampling, the
-    // failure mode that corrupts a software combine). deviceKey 0 = the primary
-    // inputDeviceManager above; deviceKeys 1..kMaxExtraInputDevices map to
-    // extraInputs[deviceKey-1]. When any extra device is active the engine runs
-    // split (the primary also uses its ring) so the output sum is uniform.
-    // (kMaxExtraInputDevices is declared up top, near kMaxSources.)
+    // ── Additional input devices — moved to engine/ExtraInputs.{h,cpp}
+    // (TLC phase 5). The split output callback drains extraInputs.slots
+    // directly; declared after pool/state (bound by reference).
+    slopsmith::ExtraInputs extraInputs{ pool, state, inputDeviceManager };
+    using InputDeviceSlot = slopsmith::ExtraInputs::InputDeviceSlot;
 
-    // Forwards a JUCE device callback to the engine, tagged with the slot index.
-    struct InputSlotCallback : juce::AudioIODeviceCallback
-    {
-        AudioEngine* engine = nullptr;
-        int slot = -1;  // index into extraInputs (deviceKey - 1)
-        void audioDeviceIOCallbackWithContext(const float* const* inputData, int numInputChannels,
-                                              float* const* outputData, int numOutputChannels,
-                                              int numSamples,
-                                              const juce::AudioIODeviceCallbackContext&) override
-        {
-            juce::ignoreUnused(outputData, numOutputChannels);
-            if (engine) engine->extraInputCallback(slot, inputData, numInputChannels, numSamples);
-        }
-        void audioDeviceAboutToStart(juce::AudioIODevice* d) override { if (engine) engine->extraInputAboutToStart(slot, d); }
-        void audioDeviceStopped() override { if (engine) engine->extraInputStopped(slot); }
-    };
+    // (mixSourcesForDevice moved to SourcePool::mixForDevice — TLC phase 5.)
 
-    struct InputDeviceSlot
-    {
-        juce::AudioDeviceManager manager;
-        InputSlotCallback callback;
-        std::array<std::atomic<uint64_t>, kOutputRingFrames> ring{};
-        std::atomic<uint64_t> writeIndex{0};
-        std::atomic<uint64_t> readIndex{0};
-        std::atomic<uint64_t> overflowCount{0};
-        std::atomic<bool> active{false};      // a device is bound + running
-        std::atomic<double> sampleRate{48000.0};
-        std::atomic<int> blockSize{256};
-        // (extra input latency − primary input latency) in seconds — applied to
-        // this device's sources' verifiers so their capture aligns with the
-        // primary-corrected playhead. Computed when the device starts.
-        std::atomic<double> latencyDeltaSec{0.0};
-        // Audio-thread scratch — one set per slot since each slot's callback runs
-        // on its own thread (can't share the primary's sourceMonitorScratch).
-        juce::AudioBuffer<float> fanScratch;       // the 2ch mix target
-        juce::AudioBuffer<float> monitorScratch;   // per-source render in the N>1 path
-        int deviceKey = 0;                         // deviceKey this slot serves (slot+1)
-        // The device the user WANTS bound here — persistent INTENT, distinct from
-        // the transient `active` (currently open). Set by bindInputDevice, cleared
-        // only by a user unbind. stopAudio()/reconfigure close the device but keep
-        // this so startAudio() re-opens it; this is what survives a device change.
-        // Mutated + read on the control thread only.
-        juce::String desiredDeviceName;
-        // Whether the NEXT extraInputStopped() for this slot is a PERMANENT unbind
-        // (deactivate its sources) vs a transient close (keep them to resume). An
-        // atomic the control thread sets and the device thread reads, so the
-        // permanent-vs-transient decision never races on the juce::String above.
-        std::atomic<bool> permanentUnbind { false };
-    };
-    std::array<InputDeviceSlot, kMaxExtraInputDevices> extraInputs;
-
-    // Per-slot callback hooks (audio + device-management threads).
-    void extraInputCallback(int slot, const float* const* inputData, int numInputChannels, int numSamples);
-    void extraInputAboutToStart(int slot, juce::AudioIODevice* device);
-    void extraInputStopped(int slot);
-    // Close an extra device but KEEP its desiredDeviceName (transient close for
-    // stop/reconfigure); reopenDesiredExtraInputs() restores them after a (re)start.
-    bool closeExtraInputDevice(int slot);
-    void reopenDesiredExtraInputs();
-
-    // Shared fan-out used by both the primary and each extra device's callback:
-    // mix every active source bound to `deviceKey` into `mixBuf` (using the
-    // caller-owned `monitorScratch` for the N>1 render so concurrent device
-    // threads never share scratch). Returns the active source count for that key.
-    int mixSourcesForDevice(int deviceKey, const float* const* inputData, int numInputChannels,
-                            juce::AudioBuffer<float>& mixBuf, juce::AudioBuffer<float>& monitorScratch,
-                            int effectiveOutputChannels, int numSamples);
-    // Pack a stereo block into a packed-uint64 SPSC ring (producer side).
-    void packStereoIntoRing(const juce::AudioBuffer<float>& buf, int numSamples,
-                            std::array<std::atomic<uint64_t>, kOutputRingFrames>& ring,
-                            std::atomic<uint64_t>& writeIndex);
-
-    // ── Streamer mix output sink (PR1) ───────────────────────────────────────
-    // A second OUTPUT AudioDeviceManager on its OWN clock that drains a dedicated
-    // SPSC ring fed by the main output path's composed stream submix. This mirrors
-    // the InputDeviceSlot pattern INVERTED to the output side: the PRODUCER is the
-    // primary/output callback (composeAndPushStreamMix), the CONSUMER is this extra
-    // output device's callback (streamSinkCallback). Default off → no behaviour change.
-    struct StreamSinkCallback : juce::AudioIODeviceCallback
-    {
-        AudioEngine* engine = nullptr;
-        void audioDeviceIOCallbackWithContext(const float* const* inputData, int numInputChannels,
-                                              float* const* outputData, int numOutputChannels,
-                                              int numSamples,
-                                              const juce::AudioIODeviceCallbackContext&) override
-        {
-            juce::ignoreUnused(inputData, numInputChannels);
-            if (engine) engine->streamSinkCallback(outputData, numOutputChannels, numSamples);
-        }
-        void audioDeviceAboutToStart(juce::AudioIODevice* d) override { if (engine) engine->streamSinkAboutToStart(d); }
-        void audioDeviceStopped() override { if (engine) engine->streamSinkStopped(); }
-    };
-    struct StreamSink
-    {
-        StreamSinkCallback callback;
-        std::array<std::atomic<uint64_t>, kOutputRingFrames> ring{};
-        std::atomic<uint64_t> writeIndex{0};
-        std::atomic<uint64_t> readIndex{0};
-        std::atomic<uint64_t> underflowCount{0};
-        std::atomic<uint64_t> overflowCount{0};
-        std::atomic<bool> active{false};
-        std::atomic<double> sampleRate{48000.0};
-        std::atomic<int> blockSize{256};
-        std::vector<float> pullScratchL, pullScratchR;  // sized in streamSinkAboutToStart
-        bool callbackRegistered = false;
-        bool initialised = false;
-        // Declared LAST so it DESTRUCTS FIRST (members tear down in reverse
-        // declaration order): the manager's dtor closes the device and detaches
-        // `callback` while `callback`/`ring` are still alive — no use-after-free
-        // even if an explicit teardown path is ever missed. stopAudio() /
-        // closeStreamSinkDevice() also tear it down explicitly before this.
-        juce::AudioDeviceManager manager;
-        // Persistent INTENT (control thread only): the device the user chose.
-        // Survives a stop/restart so reopenDesiredStreamSink() can re-open it.
-        juce::String desiredTypeName;
-        juce::String desiredDeviceName;
-    };
-    StreamSink streamSink;
-    std::atomic<bool>  streamBusIncludeBacking{true};
-    std::atomic<bool>  streamBusIncludeGuitar{true};
-    std::atomic<float> streamBusGain{1.0f};
-    std::atomic<float> streamSinkLevel{0.0f};
-    // Producer-side scratch (written by the primary/output callback): the guitar
-    // monitor-mix snapshot (pre-backing) and the composed stream submix. Sized in
+    // ── Streamer mix output sink — moved to engine/StreamSink.{h,cpp} (TLC
+    // phase 2). Declared after `state` (bound by reference).
+    slopsmith::StreamSink streamSink{state};
+    // Producer-side guitar monitor-mix snapshot (pre-backing), written by the
+    // primary/output callback and handed to streamSink.publish(). Sized in
     // audioDeviceAboutToStart / audioOutputAboutToStart alongside the other scratch.
     juce::AudioBuffer<float> streamGuitarScratch;
-    juce::AudioBuffer<float> streamMixScratch;
 
     // Clamp a requested stream gain to a finite, sane range so a NaN/Inf (or a
     // wild value) from the JS bridge can never be packed into the stream ring.
-    static float sanitizeStreamGain(float g) { return std::isfinite(g) ? juce::jlimit(0.0f, 8.0f, g) : 0.0f; }
-
-    void streamSinkCallback(float* const* outputData, int numOutputChannels, int numSamples);
-    void streamSinkAboutToStart(juce::AudioIODevice* device);
-    void streamSinkStopped();
-    void reopenDesiredStreamSink();
-    // Detach + close the stream-sink device but KEEP desiredTypeName/Name, so a
-    // stopAudio()/startAudio() cycle re-opens it (intent survives, like extra
-    // inputs). Also the single teardown used by the dtor and clearStreamOutput().
-    void closeStreamSinkDevice();
-    // Compose the stream submix from the captured guitar mix + the just-rendered
-    // backing block + the just-pulled renderer-bus block and pack it into the
-    // stream ring. Called from both output callbacks after backing render.
-    // `backingBuf` / `rendererBuf` may be null (not playing / bus gated).
-    // The renderer bus rides the includeBacking flag: it IS song audio, just
-    // fed from the renderer instead of the native transport (bus gain already
-    // applied by pullRendererBus).
-    void composeAndPushStreamMix(const juce::AudioBuffer<float>& guitarMix,
-                                 const juce::AudioBuffer<float>* backingBuf,
-                                 int backingFrames, float backingVol,
-                                 const juce::AudioBuffer<float>* rendererBuf,
-                                 int rendererFrames, int numSamples);
-
+    static float sanitizeStreamGain(float g) { return slopsmith::sanitizeStreamGain(g); }
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };

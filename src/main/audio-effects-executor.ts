@@ -29,12 +29,15 @@ type AudioEffectsNativeAudio = {
     savePreset?: () => unknown;
     clearChain?: () => Promise<unknown> | unknown;
     getChainState?: () => unknown;
+    getChainGeneration?: () => unknown;
     setBypass?: (slotId: number, bypassed: boolean) => unknown;
     setMultiBypass?: (changes: Array<{ slotId: number; bypassed: boolean }>) => unknown;
     setParameter?: (slotId: number, paramIndex: number, value: number) => unknown;
     setGain?: (which: string, value: number) => Promise<unknown> | unknown;
     setMonitorMute?: (muted: boolean) => Promise<unknown> | unknown;
     setMonitorMuteSuppressed?: (suppressed: boolean) => Promise<unknown> | unknown;
+    acquireMonitorMuteHold?: () => Promise<unknown> | unknown;
+    releaseMonitorMuteHold?: () => Promise<unknown> | unknown;
     isMonitorMuted?: () => Promise<unknown> | unknown;
     startAudio?: () => Promise<unknown> | unknown;
 };
@@ -89,6 +92,11 @@ type RouteState = {
     state: string;
     activeSegmentId: string;
     stageSlots: Map<string, number>;
+    // Native chainGeneration this route's stageSlots map was built against
+    // (phase 7a). A foreign writer (legacy loadPreset / clearChain) bumps the
+    // native counter, invalidating the slot ids; stage operations detect the
+    // divergence and report stale-route instead of mutating wrong slots.
+    chainGeneration: number;
     stageKinds: Map<string, string>;
     segments: ValidSegment[];
     loadedAt: string;
@@ -373,14 +381,22 @@ function validatePlan(request: unknown): { ok: true; plan: ValidPlan; presetJson
     };
 }
 
-function normalizeLoadResult(value: unknown): { success: boolean; slotsLoaded: number; error: string } {
+function normalizeLoadResult(value: unknown): { success: boolean; slotsLoaded: number; error: string; chainGeneration: number } {
     const record = asRecord(value);
-    if (!record) return { success: false, slotsLoaded: 0, error: 'Native load returned an unsupported result' };
+    if (!record) return { success: false, slotsLoaded: 0, error: 'Native load returned an unsupported result', chainGeneration: -1 };
     return {
         success: record.success === true,
         slotsLoaded: safeNumber(record.slotsLoaded, 0),
         error: bounded(record.error ?? ''),
+        // -1 = addon predates the counter; staleness checks then no-op.
+        chainGeneration: safeNumber(record.chainGeneration, -1),
     };
+}
+
+// Current native chainGeneration, or -1 when the addon doesn't expose it.
+function currentChainGeneration(nativeAudio: AudioEffectsNativeAudio | null): number {
+    if (!nativeAudio || typeof nativeAudio.getChainGeneration !== 'function') return -1;
+    try { return safeNumber(nativeAudio.getChainGeneration(), -1); } catch { return -1; }
 }
 
 function chainSlots(nativeAudio: AudioEffectsNativeAudio | null): Dict[] {
@@ -399,23 +415,35 @@ async function restorePreset(nativeAudio: AudioEffectsNativeAudio, presetJson: u
     }
 }
 
-async function readMonitorMuted(nativeAudio: AudioEffectsNativeAudio): Promise<boolean | null> {
-    if (typeof nativeAudio.isMonitorMuted !== 'function') return null;
-    try {
-        return Boolean(await nativeAudio.isMonitorMuted());
-    } catch (_) {
-        return null;
+// Monitor-mute arbiter (TLC Part II §2): the executor no longer reads or
+// writes the user's mute PREFERENCE. During a load it acquires a refcounted
+// override on the native arbiter — a force-mute hold (default) or a
+// suppression (dryDuringLoad: dry guitar stays audible) — and RELEASES it
+// afterwards. Returns a single-fire release closure (safe to call from a
+// timer even after newer loads: each load owns its own acquisition, so
+// releasing can never clobber another writer's state, which is exactly the
+// stale-snapshot race the old read-modify-restore had).
+async function acquireMuteOverride(nativeAudio: AudioEffectsNativeAudio, dryDuringLoad: boolean): Promise<() => Promise<void>> {
+    let released = false;
+    if (dryDuringLoad && typeof nativeAudio.setMonitorMuteSuppressed === 'function') {
+        try { await nativeAudio.setMonitorMuteSuppressed(true); } catch (_) { return async () => { /* never acquired */ }; }
+        return async () => {
+            if (released) return;
+            released = true;
+            try { await nativeAudio.setMonitorMuteSuppressed!(false); } catch (_) { /* best effort */ }
+        };
     }
-}
-
-async function trySetMonitorMute(nativeAudio: AudioEffectsNativeAudio, muted: boolean): Promise<void> {
-    if (typeof nativeAudio.setMonitorMute !== 'function') return;
-    try { await nativeAudio.setMonitorMute(muted); } catch (_) { /* best effort */ }
-}
-
-async function trySetMonitorMuteSuppressed(nativeAudio: AudioEffectsNativeAudio, suppressed: boolean): Promise<void> {
-    if (typeof nativeAudio.setMonitorMuteSuppressed !== 'function') return;
-    try { await nativeAudio.setMonitorMuteSuppressed(suppressed); } catch (_) { /* best effort */ }
+    if (!dryDuringLoad && typeof nativeAudio.acquireMonitorMuteHold === 'function') {
+        try { await nativeAudio.acquireMonitorMuteHold(); } catch (_) { return async () => { /* never acquired */ }; }
+        return async () => {
+            if (released) return;
+            released = true;
+            try { await nativeAudio.releaseMonitorMuteHold?.(); } catch (_) { /* best effort */ }
+        };
+    }
+    // Addon predates the arbiter — degrade to no mute forcing rather than
+    // reintroducing the preference-clobbering read/force/restore.
+    return async () => { /* nothing acquired */ };
 }
 
 async function trySetGain(nativeAudio: AudioEffectsNativeAudio, which: string, value: number): Promise<boolean> {
@@ -435,10 +463,13 @@ async function applyGains(nativeAudio: AudioEffectsNativeAudio, gains: RouteGain
     return failed;
 }
 
-function schedulePreloadRestore(nativeAudio: AudioEffectsNativeAudio, previousMonitorMute: boolean | null, targetGain: number, holdMs: number, shouldRestore?: () => boolean): void {
+function schedulePreloadRestore(nativeAudio: AudioEffectsNativeAudio, releaseMuteOverride: (() => Promise<void>) | null, targetGain: number, holdMs: number, shouldRestore?: () => boolean): void {
     const restore = async () => {
+        // The override release is UNCONDITIONAL: this load acquired it, this
+        // load must release it, even when a newer load superseded the gain
+        // ramp (refcounts compose — the newer load holds its own).
+        if (releaseMuteOverride) await releaseMuteOverride();
         if (shouldRestore && !shouldRestore()) return;
-        if (previousMonitorMute !== null) await trySetMonitorMute(nativeAudio, previousMonitorMute);
         const restoreTarget = clampGain(targetGain, 1);
         const steps = [restoreTarget * 0.25, restoreTarget * 0.5, restoreTarget * 0.8, restoreTarget];
         for (const value of steps) {
@@ -475,25 +506,24 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         const started = Date.now();
         const restoreVersion = ++preloadRestoreVersion;
         const rollbackPreset = typeof nativeAudio.savePreset === 'function' ? nativeAudio.savePreset() : null;
-        let previousMonitorMute: boolean | null = null;
+        let releaseMuteOverride: (() => Promise<void>) | null = null;
         if (options.preloadMute?.enabled) {
-            previousMonitorMute = await readMonitorMuted(nativeAudio);
             await trySetGain(nativeAudio, 'chain', 0);
-            await trySetMonitorMute(nativeAudio, options.preloadMute.dryDuringLoad ? false : true);
+            releaseMuteOverride = await acquireMuteOverride(nativeAudio, options.preloadMute.dryDuringLoad === true);
         }
-        let result: { success: boolean; slotsLoaded: number; error: string };
+        let result: { success: boolean; slotsLoaded: number; error: string; chainGeneration: number };
         try {
             result = normalizeLoadResult(await nativeAudio.loadPreset(validation.presetJson));
         } catch (error) {
             const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
-            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
             return safeOutcome('failed', 'Native audio-effects plan load threw', { error: bounded(error instanceof Error ? error.message : String(error)), rollbackApplied });
         }
 
         const nativeStages = validation.plan.stages.filter((stage) => stage.native);
         if (!result.success) {
             const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
-            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
             return safeOutcome('failed', 'Native audio-effects plan load failed', {
                 routeKey: validation.plan.routeKey,
                 providerId: validation.plan.providerId,
@@ -508,7 +538,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
 
         if (result.slotsLoaded < nativeStages.length) {
             const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
-            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
             return safeOutcome('degraded', 'Native audio-effects plan partially loaded and was rolled back', {
                 routeKey: validation.plan.routeKey,
                 providerId: validation.plan.providerId,
@@ -525,7 +555,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             slots = chainSlots(nativeAudio);
         } catch (error) {
             const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
-            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
             return safeOutcome('failed', 'Native chain-state lookup threw', {
                 routeKey: validation.plan.routeKey,
                 providerId: validation.plan.providerId,
@@ -545,13 +575,30 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         // as handled while later stage operations silently return no-target. Roll back instead.
         if (stageSlots.size !== nativeStages.length) {
             const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
-            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
             return safeOutcome('degraded', 'Native slot mapping was incomplete and was rolled back', {
                 routeKey: validation.plan.routeKey,
                 providerId: validation.plan.providerId,
                 planId: validation.plan.planId,
                 stageCount: nativeStages.length,
                 slotsMapped: stageSlots.size,
+                rollbackApplied,
+            });
+        }
+
+        // Detect a foreign write between our loadPreset and the getChainState
+        // slot mapping above: the mapped ids would describe someone else's
+        // chain. Roll back rather than store a poisoned route.
+        const generationNow = currentChainGeneration(nativeAudio);
+        if (result.chainGeneration >= 0 && generationNow >= 0 && generationNow !== result.chainGeneration) {
+            const rollbackApplied = await restorePreset(nativeAudio, rollbackPreset);
+            if (options.preloadMute?.enabled) schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, 0, () => restoreVersion === preloadRestoreVersion);
+            return safeOutcome('degraded', 'Native chain was modified by another writer during plan load', {
+                routeKey: validation.plan.routeKey,
+                providerId: validation.plan.providerId,
+                planId: validation.plan.planId,
+                expectedGeneration: result.chainGeneration,
+                currentGeneration: generationNow,
                 rollbackApplied,
             });
         }
@@ -563,6 +610,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             state: result.slotsLoaded >= nativeStages.length ? 'loaded' : 'degraded',
             activeSegmentId: '',
             stageSlots,
+            chainGeneration: result.chainGeneration,
             stageKinds,
             segments: validation.plan.segments,
             loadedAt: now(),
@@ -575,7 +623,7 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
             try { await nativeAudio.startAudio(); } catch (_) { /* load succeeded; start is best-effort */ }
         }
         if (options.preloadMute?.enabled) {
-            schedulePreloadRestore(nativeAudio, previousMonitorMute, options.gains.chain ?? options.preloadMute.targetGain, options.preloadMute.holdMs, () => {
+            schedulePreloadRestore(nativeAudio, releaseMuteOverride, options.gains.chain ?? options.preloadMute.targetGain, options.preloadMute.holdMs, () => {
                 const current = routes.get(validation.plan.routeKey);
                 return restoreVersion === preloadRestoreVersion && current?.planId === validation.plan.planId;
             });
@@ -613,8 +661,12 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         } catch (error) {
             releaseFailure = safeOutcome('failed', 'Native route release threw', { routeKey, error: bounded(error instanceof Error ? error.message : String(error)) });
         }
-        await trySetMonitorMute(nativeAudio, true);
-        await trySetMonitorMuteSuppressed(nativeAudio, false);
+        // Arbiter fix: releaseRoute used to FORCE monitorMute=true and clear
+        // suppression unconditionally — clobbering the user's persisted
+        // preference and any other writer's suppression window. The chain is
+        // cleared above, so the engine's own empty-chain dry-mute semantics
+        // apply; any preload override this executor still holds is released
+        // by its own scheduled closure.
         if (releaseFailure) return updateOutcome(route, releaseFailure);
         routes.delete(routeKey);
         return safeOutcome('handled', 'Audio-effects route released', { routeKey, providerId: route.providerId, planId: route.planId, cleanupFailures });
@@ -634,6 +686,23 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         return updateOutcome(route, safeOutcome('handled', 'Audio-effects route gain applied', { route: safeRoute(route), gains }));
     }
 
+    // Stage operations act on the stageSlots map built at load time; a foreign
+    // chain write since then (legacy loadPreset / clearChain — the documented
+    // three-writer fight) makes those slot ids describe someone else's chain.
+    // Detect via chainGeneration and report a stale route (the provider should
+    // re-load its plan) instead of flipping bypass/params on wrong slots.
+    function staleRouteOutcome(route: RouteState, nativeAudio: AudioEffectsNativeAudio | null, extra: Dict): SafeOutcome | null {
+        if (route.chainGeneration < 0) return null;  // addon predates the counter
+        const generationNow = currentChainGeneration(nativeAudio);
+        if (generationNow < 0 || generationNow === route.chainGeneration) return null;
+        route.state = 'stale';
+        return safeOutcome('no-target', 'Native chain was modified by another writer since this route loaded — re-load the plan', {
+            ...extra,
+            expectedGeneration: route.chainGeneration,
+            currentGeneration: generationNow,
+        });
+    }
+
     async function setStageBypass(request: unknown): Promise<SafeOutcome> {
         const input = asRecord(request) || {};
         const routeKey = safeId(input.routeKey ?? DEFAULT_ROUTE_KEY, DEFAULT_ROUTE_KEY);
@@ -644,6 +713,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         if (slotId == null) return updateOutcome(route, safeOutcome('no-target', 'Audio-effects stage is not mapped to a native slot', { routeKey, stageId }));
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setBypass !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native stage bypass is unavailable', { routeKey, stageId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, stageId });
+        if (stale) return updateOutcome(route, stale);
         try {
             const result = await nativeAudio.setBypass(slotId, safeBool(input.bypassed, false));
             if (nativeFailure(result)) return updateOutcome(route, safeOutcome('failed', 'Native stage bypass returned failure', { routeKey, stageId }));
@@ -668,6 +739,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         }
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setParameter !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native stage parameter control is unavailable', { routeKey, stageId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, stageId });
+        if (stale) return updateOutcome(route, stale);
         try {
             const result = await nativeAudio.setParameter(slotId, paramIndex, value);
             if (nativeFailure(result)) return updateOutcome(route, safeOutcome('failed', 'Native stage parameter returned failure', { routeKey, stageId, paramIndex }));
@@ -687,6 +760,8 @@ export function createAudioEffectsExecutor(getAudio: NativeAudioGetter) {
         if (!segment) return updateOutcome(route, safeOutcome('no-target', 'Audio-effects segment is not present in the loaded plan', { routeKey, segmentId }));
         const nativeAudio = getAudio();
         if (!nativeAudio || typeof nativeAudio.setMultiBypass !== 'function') return updateOutcome(route, safeOutcome('unavailable', 'Native multi-bypass is unavailable', { routeKey, segmentId }));
+        const stale = staleRouteOutcome(route, nativeAudio, { routeKey, segmentId });
+        if (stale) return updateOutcome(route, stale);
         const active = new Set(segment.stageIds);
         const changes = Array.from(route.stageSlots.entries()).map(([stageId, slotId]) => ({
             slotId,

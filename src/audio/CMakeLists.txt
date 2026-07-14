@@ -6,6 +6,19 @@ set(AUDIO_SOURCES
     NoiseGate.cpp
     TonePolish.cpp
     AudioEngine.cpp
+    engine/StreamSink.cpp
+    engine/BackingPlayer.cpp
+    engine/DeviceSetup.cpp
+    engine/SourcePool.cpp
+    engine/ExtraInputs.cpp
+    addon/AddonContext.cpp
+    addon/ChainOps.cpp
+    addon/EditorWindows.cpp
+    addon/DeviceBindings.cpp
+    addon/ControlBindings.cpp
+    addon/DetectionBindings.cpp
+    addon/ChainBindings.cpp
+    addon/BackingBindings.cpp
     SourceChain.cpp
     SignalChain.cpp
     VSTHost.cpp

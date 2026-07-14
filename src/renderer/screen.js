@@ -210,11 +210,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     function saveDeviceSettings(settings = captureDeviceSettings()) {
+        // Single persistence store (TLC Part II §4): the file-backed settings
+        // are the only writer target. The old parallel localStorage copy meant
+        // a main-side migration/reset could lose the timestamp race against a
+        // stale browser copy and resurrect wiped settings.
         const snapshot = {
             ...cloneDeviceSettings(settings),
             savedAt: Date.now(),
         };
-        try { localStorage.setItem('slopsmith-audio-device', JSON.stringify(snapshot)); } catch (_) {}
         pendingDeviceSave = pendingDeviceSave
             .catch(() => null)
             .then(() => {
@@ -255,17 +258,38 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         } catch (e) {
             console.warn('[audio-engine] Failed to load file-backed device settings:', e);
         }
+        // Migration only (TLC Part II §4): 'slopsmith-audio-device' was a
+        // second store racing the file on savedAt. Import a strictly-newer
+        // browser copy into the file store ONCE, then delete the key either
+        // way — after this the file is the single source of truth.
         let browserSettings = null;
         try {
             const raw = localStorage.getItem('slopsmith-audio-device');
             browserSettings = normalizeDeviceSettings(raw ? JSON.parse(raw) : null);
         } catch { browserSettings = null; }
-        if (fileSettings && browserSettings) {
-            return getDeviceSettingsSavedAt(browserSettings) > getDeviceSettingsSavedAt(fileSettings)
-                ? browserSettings
-                : fileSettings;
+        if (browserSettings !== null) {
+            const browserNewer = !fileSettings
+                || getDeviceSettingsSavedAt(browserSettings) > getDeviceSettingsSavedAt(fileSettings);
+            // Drop the browser copy ONLY once it is safely in the file store —
+            // deleting it after a failed (or unavailable) save would throw the
+            // user's device settings away for good.
+            let migrated = !browserNewer;
+            if (browserNewer) {
+                try {
+                    if (typeof api.saveDeviceSettings === 'function') {
+                        await api.saveDeviceSettings(browserSettings);
+                        migrated = true;
+                    }
+                } catch (e) {
+                    console.warn('[audio-engine] device-settings migration save failed:', e);
+                }
+            }
+            if (migrated) {
+                try { localStorage.removeItem('slopsmith-audio-device'); } catch (_) {}
+            }
+            if (browserNewer) return browserSettings;
         }
-        return fileSettings || browserSettings;
+        return fileSettings;
     }
 
     function hasSettingValue(value) {
@@ -4352,16 +4376,41 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // the preload below. While the chain is empty the native engine's monitor
     // mute would silence the dry guitar. Suppress the mute for the rebuild
     // window so the guitar keeps sounding; resolve it once the chain settles.
+    // The native side refcounts suppressions (SourceChain's monitor-mute
+    // arbiter): true = acquire, false = release. This latch keeps the renderer
+    // to AT MOST ONE outstanding suppression, because the guard below is
+    // deliberately unpaired — resolveChainRebuildGuard() leaves the suppression
+    // on when the rebuild produced an empty chain, and returns early without
+    // releasing while a provider route is still resolving. Under the old latched
+    // bool those were self-correcting (repeated trues were idempotent, any false
+    // reset it). Against a refcount each one would leak a permanent +1, and
+    // after a couple of song loads the count could never return to zero — monitor
+    // mute would be silently dead for the rest of the session.
+    let aeMonitorMuteSuppressionHeld = false;
     function aeSetMonitorMuteSuppressed(suppressed) {
+        const want = !!suppressed;
+        if (want === aeMonitorMuteSuppressionHeld) return;   // idempotent, like the old bool
         const api = window.feedBackDesktop?.audio;
-        // Optional-chained: a downlevel native addon simply ignores this.
+        // Downlevel addon (no arbiter): nothing is ever acquired, so leave the
+        // latch alone rather than recording a hold we don't have.
+        if (typeof api?.setMonitorMuteSuppressed !== 'function') return;
+        aeMonitorMuteSuppressionHeld = want;
+        // The latch mirrors the NATIVE refcount, so it may only stay flipped if
+        // the call actually landed. A rejected release that left the latch at
+        // "released" would short-circuit every later release while the native
+        // count stayed held — the same stuck-suppression bug, one level up. Roll
+        // back on failure so the next call retries (and only if no newer call
+        // has moved the latch on in the meantime).
+        const rollback = () => {
+            if (aeMonitorMuteSuppressionHeld === want) aeMonitorMuteSuppressionHeld = !want;
+        };
         // setMonitorMuteSuppressed is async (ipcRenderer.invoke) — the sync
-        // try/catch only covers a missing method, so also swallow the
-        // returned promise's rejection to avoid an unhandled rejection.
+        // try/catch only covers a throwing call, so handle the returned
+        // promise's rejection too (which also avoids an unhandled rejection).
         try {
-            const r = api?.setMonitorMuteSuppressed?.(suppressed);
-            if (r && typeof r.catch === 'function') r.catch(() => {});
-        } catch (_) { /* downlevel */ }
+            const r = api.setMonitorMuteSuppressed(want);
+            if (r && typeof r.catch === 'function') r.catch(rollback);
+        } catch (_) { rollback(); }
     }
     // Called by clearChainForNewSong (IIFE 1) and the preload below.
     window._aeBeginChainRebuildGuard = function () { aeSetMonitorMuteSuppressed(true); };

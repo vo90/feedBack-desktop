@@ -700,12 +700,30 @@ const ProcessorSlot* SignalChain::getSlot(int slotId) const
     return idx >= 0 ? slots[idx] : nullptr;
 }
 
-juce::Array<const ProcessorSlot*> SignalChain::getAllSlots() const
+std::vector<SignalChain::SlotSummary> SignalChain::getSlotSummaries() const
 {
-    juce::Array<const ProcessorSlot*> result;
+    std::vector<SlotSummary> result;
     const juce::ScopedLock sl(lock);
+    result.reserve((size_t) slots.size());
     for (auto* slot : slots)
-        result.add(slot);
+    {
+        SlotSummary s;
+        s.id        = slot->id;
+        s.type      = (int) slot->type;
+        s.name      = slot->name;
+        s.path      = slot->path;
+        s.bypassed  = slot->bypassed;
+        s.pan       = slot->pan;
+        s.branch    = slot->branch;
+        s.branchSrc = slot->branchSrc;
+        s.postGain  = slot->postGain;
+        // Safe under `lock`: clear() detaches the slots under the same lock
+        // before destroying them, so a slot reachable here cannot be freed
+        // mid-call. The RT thread uses a ScopedTryLock, so holding it for this
+        // metadata copy never blocks the audio callback.
+        s.hasEditor = slot->processor != nullptr && slot->processor->hasEditor();
+        result.push_back(std::move(s));
+    }
     return result;
 }
 
