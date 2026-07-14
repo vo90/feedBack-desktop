@@ -376,8 +376,11 @@ test('audio-effects executor rejects coerced parameter indices', async () => {
 });
 
 test('preload exposes the trusted audio-effects executor surface', () => {
-    const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.ts'), 'utf8');
-    const bridge = fs.readFileSync(path.join(ROOT, 'src', 'main', 'audio-bridge.ts'), 'utf8');
+    // Normalize line endings: the multi-line snippet assertion below uses
+    // \n, but a Windows checkout with core.autocrlf reads these files as
+    // \r\n — the test must not depend on the developer's git config.
+    const preload = fs.readFileSync(path.join(ROOT, 'src', 'main', 'preload.ts'), 'utf8').replace(/\r\n/g, '\n');
+    const bridge = fs.readFileSync(path.join(ROOT, 'src', 'main', 'audio-bridge.ts'), 'utf8').replace(/\r\n/g, '\n');
 
     assert.equal(preload.includes('audioEffects: {'), true);
     for (const method of ['loadChainPlan', 'releaseRoute', 'inspectRoute', 'activateSegment', 'setStageBypass', 'setStageParameter', 'setRouteGain']) {

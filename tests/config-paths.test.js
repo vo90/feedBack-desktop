@@ -111,17 +111,23 @@ test('SAFETY: song library, installed plugins and ML caches are ONLY in optInExt
             ...cats.pluginStateAndPyDeps,
             ...cats.configDbsAndState,
         ];
-        // None of the safe categories may equal or be a child of the protected dirs.
+        // None of the safe categories may equal or be a child of the protected
+        // dirs. Use the env's RESOLVED fields (exactly what production
+        // returns) rather than rebuilding them with host-native path.join —
+        // on Windows that produced backslash paths that never matched the
+        // forward-slash simulated envs, failing the mlCaches equality AND
+        // silently vacuous-passing these child checks. The simulated env
+        // paths are forward-slash on every platform, so '/' is the separator.
         const protectedRoots = [
             env.dlcDir,
             env.pluginsDir,
-            path.join(env.cacheBase, 'torch'),
-            path.join(env.cacheBase, 'huggingface'),
+            env.torchHome,
+            env.hfHome,
         ];
         for (const root of protectedRoots) {
             assert.ok(!safe.includes(root), `${name}: ${root} leaked into a safe category`);
             assert.ok(
-                !safe.some((p) => p === root || p.startsWith(root + path.sep)),
+                !safe.some((p) => p === root || p.startsWith(root + '/')),
                 `${name}: a safe path lives under protected ${root}`,
             );
         }
@@ -130,7 +136,7 @@ test('SAFETY: song library, installed plugins and ML caches are ONLY in optInExt
         assert.deepEqual(cats.optInExtras.installedPlugins, [env.pluginsDir], `${name}: installedPlugins`);
         assert.deepEqual(
             cats.optInExtras.mlCaches,
-            [path.join(env.cacheBase, 'torch'), path.join(env.cacheBase, 'huggingface')],
+            [env.torchHome, env.hfHome],
             `${name}: mlCaches`,
         );
     }
