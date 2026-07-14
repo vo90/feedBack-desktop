@@ -73,6 +73,33 @@ bool isChainRebuildPending()
 
 namespace {
 
+// As above, but the mutation yields a slot id (resolved as a Number).
+class ChainSlotMutationWorker : public Napi::AsyncWorker
+{
+public:
+    ChainSlotMutationWorker(Napi::Env env, Napi::Promise::Deferred deferred,
+                            std::function<int(AudioEngine&)> mutate)
+        : Napi::AsyncWorker(env), deferred_(deferred), mutate_(std::move(mutate)) {}
+
+    void Execute() override
+    {
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
+        auto liveEngine = snapshotEngine();
+        if (!liveEngine) return;            // slotId_ stays -1
+        slotId_ = mutate_(*liveEngine);
+        if (slotId_ >= 0)
+            slopsmith::addon::bumpChainGeneration();   // still under chainLock
+    }
+
+    void OnOK() override { deferred_.Resolve(Napi::Number::New(Env(), slotId_)); }
+    void OnError(const Napi::Error& e) override { deferred_.Reject(e.Value()); }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    std::function<int(AudioEngine&)> mutate_;
+    int slotId_ = -1;
+};
+
 class ChainMutationWorker : public Napi::AsyncWorker
 {
 public:
@@ -117,6 +144,14 @@ Napi::Value queueChainMutation(Napi::Env env,
     auto deferred = Napi::Promise::Deferred::New(env);
     auto* worker = new ChainMutationWorker(env, deferred, std::move(mutate),
                                            releasesRebuildBarrier);
+    worker->Queue();
+    return deferred.Promise();
+}
+
+Napi::Value queueChainSlotMutation(Napi::Env env, std::function<int(AudioEngine&)> mutate)
+{
+    auto deferred = Napi::Promise::Deferred::New(env);
+    auto* worker = new ChainSlotMutationWorker(env, deferred, std::move(mutate));
     worker->Queue();
     return deferred.Promise();
 }
@@ -517,15 +552,18 @@ Napi::Value LoadVST(const Napi::CallbackInfo& info)
 
    #if JUCE_MAC
     // On macOS the JUCE MessageManager is bound to the Node/main thread.
-    // Running this as an AsyncWorker would call vstHost->loadPlugin on a
+    // Running the LOAD as an AsyncWorker would call vstHost->loadPlugin on a
     // libuv worker thread, which JUCE documents as unsupported for VST/AU
-    // instantiation. Do the load synchronously on the Node/main thread
-    // (same as the pre-PR LoadVST) and return a resolved Promise to match
-    // the new signature. Pays the foreground-block cost the AsyncWorker
-    // path was supposed to avoid, but that's the existing macOS reality —
-    // dispatchOnMessageThread already runs inline there. The async-load
-    // motivation (AmpliTube blocking the background JUCE message thread
-    // under Electron) is a Windows-only problem.
+    // instantiation — so the instantiation stays here, on the Node/main
+    // thread, and pays the foreground-block cost (the existing macOS reality;
+    // dispatchOnMessageThread already runs inline there). The async-load
+    // motivation (AmpliTube blocking the background JUCE message thread under
+    // Electron) is a Windows-only problem.
+    //
+    // The chain MUTATION, however, moves to a worker — see the comment above
+    // queueChainSlotMutation below for the deadlock that a blocking lock here
+    // caused.
+    //
     // Snapshot once for the whole load so the same AudioEngine is used for
     // the sr/bs reads and the addProcessor mutation, even if shutdown
     // resets the global mid-call.
@@ -551,33 +589,43 @@ Napi::Value LoadVST(const Napi::CallbackInfo& info)
         return deferred.Promise();
     }
 
-    int slotId = -1;
-    if (processor)
-    {
-        auto name = processor->getName();
-        // Serialize with the async chain workers (deep-read 1): an unguarded
-        // addProcessor here could land a slot inside a LoadPresetWorker's
-        // clear()+rebuild running on a libuv thread. Deadlock-safe on macOS:
-        // a worker holding this mutex never waits on THIS (Node/main) thread —
-        // loadVstSandboxAware's JUCE_MAC branch is a synchronous load on the
-        // worker itself, and dispatchOnMessageThread runs inline there. Only
-        // the mutation is guarded; the slow plugin load above stays outside
-        // the lock.
-        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
-        slotId = liveEngine->getSignalChain().addProcessor(
-            std::move(processor),
-            ProcessorSlot::Type::VST,
-            name,
-            juce::String(pluginPath));
-        if (slotId >= 0)
-            slopsmith::addon::bumpChainGeneration();  // still under chainLock
-    }
-    else
+    if (! processor)
     {
         fprintf(stderr, "[LoadVST] Failed: %s\n", error.toRawUTF8());
+        deferred.Resolve(Napi::Number::New(env, -1));
+        return deferred.Promise();
     }
-    deferred.Resolve(Napi::Number::New(env, slotId));
-    return deferred.Promise();
+
+    // Serialize with the async chain workers (deep-read 1): an unguarded
+    // addProcessor here could land a slot inside a LoadPresetWorker's
+    // clear()+rebuild running on a libuv thread.
+    //
+    // But take the mutex on a WORKER, never on this (Node/main) thread. The
+    // previous blocking lock_guard here deadlocked macOS: a LoadPresetWorker
+    // holding the mutex calls JUCE's *synchronous* createPluginInstance, which —
+    // when called off the message thread, as it is on a libuv worker — posts an
+    // AsyncCreateMessage to the message thread and blocks on it
+    // (juce_AudioPluginFormat.cpp: createInstanceFromDescription). On macOS the
+    // message thread IS this Node/main thread, and it has no pump — its queue is
+    // drained by a libuv timer that only runs when this thread is idle. So
+    // blocking here stops the queue draining, the worker's load never completes,
+    // the mutex is never released, and the app hangs for good.
+    //
+    // The plugin INSTANTIATION above must stay on this thread (JUCE requires the
+    // message thread for VST/AU on macOS); only the mutation moves off it. While
+    // the worker waits for the mutex, this thread stays free to drain the queue,
+    // so the in-flight load can finish and release it.
+    //
+    // unique_ptr can't be captured by a std::function (copyable), so hand it over
+    // in a shared holder.
+    auto held = std::make_shared<std::unique_ptr<juce::AudioProcessor>>(std::move(processor));
+    auto name = (*held)->getName();
+    return slopsmith::addon::queueChainSlotMutation(
+        env, [held, name, pluginPath](AudioEngine& eng) {
+            if (! *held) return -1;   // a retry can't re-add an already-moved processor
+            return eng.getSignalChain().addProcessor(
+                std::move(*held), ProcessorSlot::Type::VST, name, juce::String(pluginPath));
+        });
    #else
     auto* worker = new LoadVSTWorker(env, deferred, std::move(pluginPath));
     worker->Queue();

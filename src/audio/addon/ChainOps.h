@@ -71,6 +71,13 @@ Napi::Value queueChainMutation(Napi::Env env,
                                std::function<void(AudioEngine&)> mutate,
                                bool releasesRebuildBarrier = false);
 
+// Same, for a mutation that yields a slot id: resolves the returned Number
+// (-1 when the engine went away). Used by LoadVST's macOS branch, where the
+// plugin must be INSTANTIATED on the Node/main thread but its addProcessor
+// must not be, because the mutex it needs can be held by a worker that is
+// itself waiting on that thread.
+Napi::Value queueChainSlotMutation(Napi::Env env, std::function<int(AudioEngine&)> mutate);
+
 // ── Rebuild barrier (editor-open gate) ────────────────────────────────────
 // A chain clear/rebuild is a two-step dance: editors are torn down on the
 // message thread FIRST, then the mutation runs (synchronously for ClearChain,
