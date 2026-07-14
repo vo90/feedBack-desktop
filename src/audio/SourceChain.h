@@ -142,10 +142,40 @@ public:
     // then a channel index WITHIN the bound device.
     void setDeviceKey(int key) { deviceKey.store(key, std::memory_order_release); }
     int getDeviceKey() const { return deviceKey.load(std::memory_order_acquire); }
-    void setMonitorMute(bool mute) { monitorMuted.store(mute); }
-    bool isMonitorMuted() const { return monitorMuted.load(); }
-    void setMonitorMuteSuppressed(bool s) { monitorMuteSuppressed.store(s); }
-    bool isMonitorMuteSuppressed() const { return monitorMuteSuppressed.load(); }
+    // ── Monitor-mute arbiter (TLC Part II §2 fix) ─────────────────────────────
+    // The old single monitorMuted atomic had FIVE writers (settings checkbox,
+    // startup restore, executor preload-mute, executor releaseRoute, renderer
+    // song-load suppression) fighting last-writer-wins — releaseRoute clobbered
+    // the user's persisted preference and overlapping suppression windows
+    // un-suppressed each other. Now three composable inputs:
+    //   userMonitorMute      — the PREFERENCE (checkbox + startup restore).
+    //   monitorMuteHolds     — refcounted "force mute" overrides (executor
+    //                          preload-mute); released, never "restored".
+    //   monitorMuteSuppress  — refcounted "force unmute" windows (song-load
+    //                          chain rebuilds). Wins over pref + holds,
+    //                          preserving the old suppressed-beats-muted rule.
+    // effective dry-mute = (holds>0 || pref) && chain empty && suppress==0.
+    void setMonitorMute(bool mute) { userMonitorMute.store(mute); }
+    bool isMonitorMuted() const { return userMonitorMute.load(); }
+    void acquireMonitorMuteHold() { monitorMuteHolds.fetch_add(1, std::memory_order_acq_rel); }
+    void releaseMonitorMuteHold()
+    {
+        // Clamp at 0: an unpaired release (old callers, crashed holder) must
+        // not underflow into a permanently-forced state.
+        int cur = monitorMuteHolds.load(std::memory_order_acquire);
+        while (cur > 0 && !monitorMuteHolds.compare_exchange_weak(cur, cur - 1, std::memory_order_acq_rel)) {}
+    }
+    // Back-compat surface: true = acquire a suppression, false = release one.
+    // Overlapping windows now compose instead of last-clear-wins.
+    void setMonitorMuteSuppressed(bool s)
+    {
+        if (s) { monitorMuteSuppress.fetch_add(1, std::memory_order_acq_rel); return; }
+        int cur = monitorMuteSuppress.load(std::memory_order_acquire);
+        while (cur > 0 && !monitorMuteSuppress.compare_exchange_weak(cur, cur - 1, std::memory_order_acq_rel)) {}
+    }
+    bool isMonitorMuteSuppressed() const { return monitorMuteSuppress.load(std::memory_order_acquire) > 0; }
+    int getMonitorMuteHoldCount() const { return monitorMuteHolds.load(std::memory_order_acquire); }
+    int getMonitorMuteSuppressCount() const { return monitorMuteSuppress.load(std::memory_order_acquire); }
     // Full monitor kill — silences the guitar bus UNCONDITIONALLY (dry AND the
     // processed/amp-sim signal), unlike setMonitorMute which only mutes the dry
     // pass-through when no processors are loaded. For users who monitor through
@@ -200,8 +230,9 @@ private:
     std::atomic<int> deviceKey{0};             // 0 = primary input device
     std::atomic<double> verifierAutoOffset{0.0}; // engine: device-latency delta
     std::atomic<double> verifierUserOffset{0.0}; // renderer: manual fine-tune
-    std::atomic<bool> monitorMuted{true};
-    std::atomic<bool> monitorMuteSuppressed{false};
+    std::atomic<bool> userMonitorMute{true};
+    std::atomic<int> monitorMuteHolds{0};
+    std::atomic<int> monitorMuteSuppress{0};
     std::atomic<bool> monitorKill{false};
     std::atomic<uint32_t> nonFiniteChainBlocks{0};
 

@@ -165,6 +165,11 @@ public:
     // so the brief empty-chain window doesn't silence the player's guitar.
     void setMonitorMuteSuppressed(bool suppressed) { source0().setMonitorMuteSuppressed(suppressed); }
     bool isMonitorMuteSuppressed() const { return source0().isMonitorMuteSuppressed(); }
+    // Refcounted force-mute overrides (see SourceChain's arbiter comment).
+    void acquireMonitorMuteHold() { source0().acquireMonitorMuteHold(); }
+    void releaseMonitorMuteHold() { source0().releaseMonitorMuteHold(); }
+    int getMonitorMuteHoldCount() const { return source0().getMonitorMuteHoldCount(); }
+    int getMonitorMuteSuppressCount() const { return source0().getMonitorMuteSuppressCount(); }
 
     // Full monitor kill — silences the guitar bus entirely (dry + processed),
     // for monitoring through an external rig. Unlike the per-source mute/gain

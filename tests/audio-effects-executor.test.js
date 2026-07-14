@@ -200,18 +200,26 @@ test('audio-effects executor owns load mute, route gain, start, and release', as
     assert.equal(gained.outcome, 'handled');
     assert.equal(released.outcome, 'handled');
     assert.equal(inspected.outcome, 'no-target');
-    assert.deepEqual(calls.slice(0, 7), [
-        ['is-muted'],
+    // Monitor-mute arbiter (TLC Part II §2): the executor never reads or
+    // writes the user's mute preference — it acquires a suppression for the
+    // dry-during-load window (default) and releases exactly what it acquired.
+    assert.deepEqual(calls.slice(0, 6), [
         ['gain', 'chain', 0],
-        ['monitor', false],
+        ['suppress', true],
         ['load', 2],
         ['gain', 'input', 8],
         ['start'],
         ['gain', 'chain', 2],
     ]);
     assert.equal(calls.some(call => call[0] === 'clear'), true);
-    assert.equal(calls.some(call => call[0] === 'monitor' && call[1] === true), true);
-    assert.equal(calls.some(call => call[0] === 'suppress' && call[1] === false), true);
+    // The preference API is untouched, in both directions — releaseRoute no
+    // longer forces monitorMute=true over the user's persisted choice.
+    assert.equal(calls.some(call => call[0] === 'is-muted'), false);
+    assert.equal(calls.some(call => call[0] === 'monitor'), false);
+    // The suppression is balanced: one acquire, one release — never an
+    // unpaired clear that would cancel another writer's window.
+    assert.equal(calls.filter(call => call[0] === 'suppress' && call[1] === true).length, 1);
+    assert.equal(calls.filter(call => call[0] === 'suppress' && call[1] === false).length, 1);
     assert.equal(calls.some(call => call[0] === 'gain' && call[1] === 'chain' && call[2] === 4), false);
     assert.equal(calls.some(call => call[0] === 'gain' && call[1] === 'chain' && call[2] === 0), true);
 });

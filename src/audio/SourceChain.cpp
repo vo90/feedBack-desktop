@@ -252,7 +252,9 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     // chain yet. Backing track still plays through. Suppressed during a song-load
     // chain rebuild so the brief (or failed) empty-chain window doesn't silence
     // the guitar.
-    if (monitorMuted.load() && !hasProcessors && !monitorMuteSuppressed.load())
+    if ((monitorMuteHolds.load(std::memory_order_acquire) > 0 || userMonitorMute.load())
+        && !hasProcessors
+        && monitorMuteSuppress.load(std::memory_order_acquire) == 0)
         buffer.clear();
 
     // Full monitor kill: silence the guitar bus unconditionally — dry AND the

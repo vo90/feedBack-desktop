@@ -80,6 +80,37 @@ Napi::Value SetMonitorMuteSuppressed(const Napi::CallbackInfo& info)
     return info.Env().Undefined();
 }
 
+// Refcounted force-mute overrides (monitor-mute arbiter, TLC Part II §2).
+// The audio-effects executor holds one across a chain load and RELEASES it
+// afterwards — it never reads/writes the user's mute preference anymore.
+Napi::Value AcquireMonitorMuteHold(const Napi::CallbackInfo& info)
+{
+    if (auto liveEngine = snapshotEngine())
+        liveEngine->acquireMonitorMuteHold();
+    return info.Env().Undefined();
+}
+
+Napi::Value ReleaseMonitorMuteHold(const Napi::CallbackInfo& info)
+{
+    if (auto liveEngine = snapshotEngine())
+        liveEngine->releaseMonitorMuteHold();
+    return info.Env().Undefined();
+}
+
+// Diagnostic/testing view of the arbiter's three inputs.
+Napi::Value GetMonitorMuteState(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto obj = Napi::Object::New(env);
+    if (auto liveEngine = snapshotEngine())
+    {
+        obj.Set("userMute", liveEngine->isMonitorMuted());
+        obj.Set("holds", liveEngine->getMonitorMuteHoldCount());
+        obj.Set("suppressions", liveEngine->getMonitorMuteSuppressCount());
+    }
+    return obj;
+}
+
 Napi::Value SetMonitorKill(const Napi::CallbackInfo& info)
 {
     // IsBoolean()-guarded (fail-soft no-op on a downlevel/mismatched caller),
