@@ -109,6 +109,7 @@ using slopsmith::addon::SetMonitorMuteSuppressed;
 using slopsmith::addon::AcquireMonitorMuteHold;
 using slopsmith::addon::ReleaseMonitorMuteHold;
 using slopsmith::addon::GetMonitorMuteState;
+using slopsmith::addon::GetLatencyBreakdown;
 using slopsmith::addon::SetMultiBypass;
 using slopsmith::addon::SetNoiseGate;
 using slopsmith::addon::SetNoteDetectionEnabled;
@@ -352,6 +353,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("acquireMonitorMuteHold", Napi::Function::New(env, AcquireMonitorMuteHold));
     exports.Set("releaseMonitorMuteHold", Napi::Function::New(env, ReleaseMonitorMuteHold));
     exports.Set("getMonitorMuteState", Napi::Function::New(env, GetMonitorMuteState));
+    exports.Set("getLatencyBreakdown", Napi::Function::New(env, GetLatencyBreakdown));
     exports.Set("isMonitorMuted", Napi::Function::New(env, IsMonitorMuted));
     exports.Set("setMonitorKill", Napi::Function::New(env, SetMonitorKill));
     exports.Set("setNoiseGate", Napi::Function::New(env, SetNoiseGate));

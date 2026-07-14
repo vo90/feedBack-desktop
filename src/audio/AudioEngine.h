@@ -280,6 +280,25 @@ public:
     // Latency
     double getLatencyMs() const;
 
+    // One owner for every latency term (TLC deep-read §5) — the previous
+    // three unreconciled truths were getLatencyMs' static half-capacity ring
+    // guess, the verifier's input-latency-delta-only offset, and the renderer
+    // bus adding prime+fill+resample that no figure surfaced. All ms.
+    struct LatencyBreakdown
+    {
+        double sampleRate = 0.0;
+        bool duplex = true;
+        double deviceBufferMs = 0.0;     // input buffer (+ output buffer when split)
+        double inputLatencyMs = 0.0;     // driver-reported capture latency
+        double outputLatencyMs = 0.0;    // driver-reported playback latency
+        double splitRingMs = 0.0;        // MEASURED primary-ring residency (0 in duplex)
+        double monitorTotalMs = 0.0;     // guitar in→out: buffers + in/out + splitRing
+        // Renderer-bus song-audio delay: measured bus fill (includes the
+        // ~10.7 ms prime cushion once flowing). 0 when the bus is off.
+        double rendererBusMs = 0.0;
+    };
+    LatencyBreakdown getLatencyBreakdown() const;
+
     // Raw input frame snapshot for renderer-side polyphonic chord scoring in
     // notedetect. Backed by sources[0]'s pre-gate input ring; the rings (and the
     // power-of-two capacity constants) now live on SourceChain. Default snapshot

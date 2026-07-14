@@ -11,6 +11,8 @@ class SourceChain;
 
 namespace slopsmith::addon {
 
+Napi::Value GetLatencyBreakdown(const Napi::CallbackInfo& info);
+
 // Validate a JS source-id argument and return the live source (nullptr for
 // missing / non-Number / non-finite / out-of-range). Shared by the
 // source-indexed bindings across the split files.

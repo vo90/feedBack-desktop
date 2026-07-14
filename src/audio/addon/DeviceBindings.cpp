@@ -831,4 +831,22 @@ Napi::Value GetSampleRate(const Napi::CallbackInfo& info)
 }
 
 
+Napi::Value GetLatencyBreakdown(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto obj = Napi::Object::New(env);
+    auto liveEngine = snapshotEngine();
+    if (!liveEngine) return obj;
+    const auto b = liveEngine->getLatencyBreakdown();
+    obj.Set("sampleRate", b.sampleRate);
+    obj.Set("duplex", b.duplex);
+    obj.Set("deviceBufferMs", b.deviceBufferMs);
+    obj.Set("inputLatencyMs", b.inputLatencyMs);
+    obj.Set("outputLatencyMs", b.outputLatencyMs);
+    obj.Set("splitRingMs", b.splitRingMs);
+    obj.Set("monitorTotalMs", b.monitorTotalMs);
+    obj.Set("rendererBusMs", b.rendererBusMs);
+    return obj;
+}
+
 } // namespace slopsmith::addon

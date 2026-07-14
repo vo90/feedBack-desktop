@@ -228,6 +228,54 @@ double AudioEngine::getLatencyMs() const
     return (totalSamples / sr) * 1000.0;
 }
 
+AudioEngine::LatencyBreakdown AudioEngine::getLatencyBreakdown() const
+{
+    LatencyBreakdown b;
+    const double sr = currentSampleRate.load(std::memory_order_relaxed);
+    b.sampleRate = sr;
+    b.duplex = duplexMode.load(std::memory_order_relaxed);
+    if (sr <= 0.0) return b;
+    const auto ms = [sr](double samples) { return (samples / sr) * 1000.0; };
+
+    if (b.duplex)
+    {
+        if (auto* device = inputDeviceManager.getCurrentAudioDevice())
+        {
+            b.deviceBufferMs = ms(device->getCurrentBufferSizeSamples());
+            b.inputLatencyMs = ms(device->getInputLatencyInSamples());
+            b.outputLatencyMs = ms(device->getOutputLatencyInSamples());
+        }
+    }
+    else
+    {
+        if (auto* in = inputDeviceManager.getCurrentAudioDevice())
+        {
+            b.deviceBufferMs += ms(in->getCurrentBufferSizeSamples());
+            b.inputLatencyMs = ms(in->getInputLatencyInSamples());
+        }
+        if (auto* out = outputDeviceManager.getCurrentAudioDevice())
+        {
+            b.deviceBufferMs += ms(out->getCurrentBufferSizeSamples());
+            b.outputLatencyMs = ms(out->getOutputLatencyInSamples());
+        }
+        // MEASURED ring residency — getLatencyMs() still reports the static
+        // half-capacity estimate for compatibility; this is the live figure
+        // getDeviceMetrics already exposes, converted to time.
+        const uint64_t w = outputRing.writeIndex.load(std::memory_order_acquire);
+        const uint64_t r = outputRing.readIndex.load(std::memory_order_acquire);
+        const uint64_t fill = (w >= r) ? (w - r) : 0;
+        b.splitRingMs = ms((double) std::min<uint64_t>(fill, (uint64_t) kOutputRingFrames));
+    }
+    b.monitorTotalMs = b.deviceBufferMs + b.inputLatencyMs + b.outputLatencyMs + b.splitRingMs;
+
+    // Song audio over the renderer bus is delayed by the measured bus fill —
+    // a term no previous latency figure surfaced (deep-read 5).
+    const auto busMetrics = rendererBus.metrics();
+    if (busMetrics.enabled)
+        b.rendererBusMs = ms((double) busMetrics.fillFrames);
+    return b;
+}
+
 // ── Device Selection ──────────────────────────────────────────────────────────
 
 bool AudioEngine::setDeviceType(const juce::String& typeName)

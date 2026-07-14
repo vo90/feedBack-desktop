@@ -17,6 +17,7 @@
   "getDeviceMetrics",
   "getDeviceTypes",
   "getKnownPlugins",
+  "getLatencyBreakdown",
   "getLevels",
   "getMonitorMuteState",
   "getNoteVerdicts",
