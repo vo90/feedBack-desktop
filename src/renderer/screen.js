@@ -270,14 +270,23 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         if (browserSettings !== null) {
             const browserNewer = !fileSettings
                 || getDeviceSettingsSavedAt(browserSettings) > getDeviceSettingsSavedAt(fileSettings);
+            // Drop the browser copy ONLY once it is safely in the file store —
+            // deleting it after a failed (or unavailable) save would throw the
+            // user's device settings away for good.
+            let migrated = !browserNewer;
             if (browserNewer) {
                 try {
-                    if (typeof api.saveDeviceSettings === 'function') await api.saveDeviceSettings(browserSettings);
+                    if (typeof api.saveDeviceSettings === 'function') {
+                        await api.saveDeviceSettings(browserSettings);
+                        migrated = true;
+                    }
                 } catch (e) {
                     console.warn('[audio-engine] device-settings migration save failed:', e);
                 }
             }
-            try { localStorage.removeItem('slopsmith-audio-device'); } catch (_) {}
+            if (migrated) {
+                try { localStorage.removeItem('slopsmith-audio-device'); } catch (_) {}
+            }
             if (browserNewer) return browserSettings;
         }
         return fileSettings;
@@ -4367,14 +4376,28 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // the preload below. While the chain is empty the native engine's monitor
     // mute would silence the dry guitar. Suppress the mute for the rebuild
     // window so the guitar keeps sounding; resolve it once the chain settles.
+    // The native side refcounts suppressions (SourceChain's monitor-mute
+    // arbiter): true = acquire, false = release. This latch keeps the renderer
+    // to AT MOST ONE outstanding suppression, because the guard below is
+    // deliberately unpaired — resolveChainRebuildGuard() leaves the suppression
+    // on when the rebuild produced an empty chain, and returns early without
+    // releasing while a provider route is still resolving. Under the old latched
+    // bool those were self-correcting (repeated trues were idempotent, any false
+    // reset it). Against a refcount each one would leak a permanent +1, and
+    // after a couple of song loads the count could never return to zero — monitor
+    // mute would be silently dead for the rest of the session.
+    let aeMonitorMuteSuppressionHeld = false;
     function aeSetMonitorMuteSuppressed(suppressed) {
+        const want = !!suppressed;
+        if (want === aeMonitorMuteSuppressionHeld) return;   // idempotent, like the old bool
+        aeMonitorMuteSuppressionHeld = want;
         const api = window.feedBackDesktop?.audio;
         // Optional-chained: a downlevel native addon simply ignores this.
         // setMonitorMuteSuppressed is async (ipcRenderer.invoke) — the sync
         // try/catch only covers a missing method, so also swallow the
         // returned promise's rejection to avoid an unhandled rejection.
         try {
-            const r = api?.setMonitorMuteSuppressed?.(suppressed);
+            const r = api?.setMonitorMuteSuppressed?.(want);
             if (r && typeof r.catch === 'function') r.catch(() => {});
         } catch (_) { /* downlevel */ }
     }

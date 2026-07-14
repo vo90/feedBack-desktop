@@ -1194,13 +1194,17 @@ export function initAudioBridge(): void {
         return await audio?.replaceIR(slotId, irPath, typeof gain === 'number' ? gain : -1) ?? false;
     });
 
-    ipcMain.handle('audio:removeProcessor', (_event, slotId: number) => {
-        audio?.removeProcessor(slotId);
+    // The native chain mutators are async now (they take the chain-mutation
+    // mutex on a worker thread rather than freezing the main process behind an
+    // in-flight plugin load — see ChainOps.h). Await them so a renderer that
+    // awaits this IPC and then re-reads the chain sees the mutation applied.
+    ipcMain.handle('audio:removeProcessor', async (_event, slotId: number) => {
+        await audio?.removeProcessor(slotId);
         vstSlotPaths.delete(slotId);
     });
 
-    ipcMain.handle('audio:moveProcessor', (_event, from: number, to: number) => {
-        audio?.moveProcessor(from, to);
+    ipcMain.handle('audio:moveProcessor', async (_event, from: number, to: number) => {
+        await audio?.moveProcessor(from, to);
     });
 
     ipcMain.handle('audio:setBypass', (_event, slotId: number, bypassed: boolean) => {
@@ -1221,8 +1225,8 @@ export function initAudioBridge(): void {
         audio?.setBranchSrc?.(slotId, src);
     });
 
-    ipcMain.handle('audio:clearChain', () => {
-        audio?.clearChain();
+    ipcMain.handle('audio:clearChain', async () => {
+        await audio?.clearChain();
         vstSlotPaths.clear();
     });
 

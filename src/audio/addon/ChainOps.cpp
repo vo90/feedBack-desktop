@@ -63,6 +63,64 @@ bool isChainRebuildPending()
     return chainRebuildsPending.load(std::memory_order_acquire) > 0;
 }
 
+// ── Async chain mutation (see ChainOps.h) ───────────────────────────────────
+// The synchronous mutators (clearChain / removeProcessor / moveProcessor) used
+// to take chainMutationMutex with a blocking lock_guard on the N-API thread.
+// That thread is Electron's main thread — and on macOS it is also the JUCE
+// message thread — so waiting there behind a LoadPreset worker that holds the
+// mutex across an unbounded plugin init froze the app (or deadlocked the pump
+// the load needs). Queue the mutation instead and let the worker do the waiting.
+
+namespace {
+
+class ChainMutationWorker : public Napi::AsyncWorker
+{
+public:
+    ChainMutationWorker(Napi::Env env, Napi::Promise::Deferred deferred,
+                        std::function<void(AudioEngine&)> mutate, bool releasesBarrier)
+        : Napi::AsyncWorker(env)
+        , deferred_(deferred)
+        , mutate_(std::move(mutate))
+        , releasesBarrier_(releasesBarrier) {}
+
+    void Execute() override
+    {
+        struct BarrierRelease {
+            bool armed;
+            ~BarrierRelease() { if (armed) slopsmith::addon::endChainRebuild(); }
+        } barrierRelease{ releasesBarrier_ };
+
+        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
+        auto liveEngine = snapshotEngine();
+        if (!liveEngine) return;            // ok_ stays false
+        mutate_(*liveEngine);
+        slopsmith::addon::bumpChainGeneration();   // still under chainLock
+        ok_ = true;
+    }
+
+    void OnOK() override { deferred_.Resolve(Napi::Boolean::New(Env(), ok_)); }
+    void OnError(const Napi::Error& e) override { deferred_.Reject(e.Value()); }
+
+private:
+    Napi::Promise::Deferred deferred_;
+    std::function<void(AudioEngine&)> mutate_;
+    bool releasesBarrier_ = false;
+    bool ok_ = false;
+};
+
+} // namespace
+
+Napi::Value queueChainMutation(Napi::Env env,
+                               std::function<void(AudioEngine&)> mutate,
+                               bool releasesRebuildBarrier)
+{
+    auto deferred = Napi::Promise::Deferred::New(env);
+    auto* worker = new ChainMutationWorker(env, deferred, std::move(mutate),
+                                           releasesRebuildBarrier);
+    worker->Queue();
+    return deferred.Promise();
+}
+
 // ── decodeStateBlob (moved verbatim) ────────────────────
 
 // Decode a state blob that may be in EITHER base64 flavour. JUCE's
@@ -904,11 +962,18 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
     // returning and the queued worker acquiring chainMutationMutex, nothing
     // else stops OpenPluginEditor from opening a fresh editor whose processor
     // the worker is about to free (#56). The barrier gates editor opens for
-    // the whole teardown+rebuild window; the worker releases it on every
-    // Execute() exit path. Nothing between here and Queue() can throw: the
-    // teardown-failure path below releases explicitly, and the worker's
-    // BarrierRelease guard covers every Execute() exit.
+    // the whole teardown+rebuild window.
+    //
+    // Ownership passes to the worker (whose BarrierRelease covers every
+    // Execute() exit) only once Queue() has actually taken it. Until then this
+    // guard holds it, so any early return — or a throwing allocation — releases
+    // instead of leaking a barrier that would block editor opens forever.
     slopsmith::addon::beginChainRebuild();
+    bool barrierHandedOff = false;
+    struct BarrierGuard {
+        const bool& handedOff;
+        ~BarrierGuard() { if (!handedOff) slopsmith::addon::endChainRebuild(); }
+    } barrierGuard{ barrierHandedOff };
 
     // Tear down any open in-process editor windows NOW, on the N-API/main
     // thread, before the AsyncWorker frees the chain's processors on a libuv
@@ -923,7 +988,6 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
         // bound to a chain processor. Clearing/rebuilding now would free that
         // processor under the live editor — the documented UAF. Abort the
         // load instead of proceeding.
-        slopsmith::addon::endChainRebuild();
         auto obj = Napi::Object::New(env);
         obj.Set("success", false);
         obj.Set("error", "editor teardown did not complete; preset load aborted");
@@ -933,6 +997,7 @@ Napi::Value LoadPreset(const Napi::CallbackInfo& info)
 
     auto worker = new LoadPresetWorker(env, deferred, std::move(json));
     worker->Queue();
+    barrierHandedOff = true;
     return deferred.Promise();
 }
 

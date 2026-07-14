@@ -166,6 +166,35 @@ static void testFlushOnDisable()
     assert(dl[1] == 7.0f && "post-re-enable audio must be the fresh push");
 }
 
+// A pending flush must drop the STALE tail only. If no output callback runs
+// between the disable and a re-enable (stopped device, device swap), the
+// flush is still pending when fresh audio arrives — flushing to the live
+// writeIndex at that point would discard the re-enabled bus's first frames
+// too, silencing it until it re-primed. The flush target is snapshotted at
+// disable time instead.
+static void testFlushSparesPostReEnableAudio()
+{
+    RendererBus bus;
+    bus.setEnabled(true, 1.0f);
+    const auto stale = rampChunk(RendererBus::kPrimeFrames * 2, 5.0f, 0.0f);
+    bus.push(stale.data(), RendererBus::kPrimeFrames * 2, 48000.0, 48000.0);
+
+    // Disable + re-enable with NO pull in between: the flush is still pending.
+    bus.setEnabled(false, 1.0f);
+    bus.setEnabled(true, 1.0f);
+
+    // Fresh audio pushed while the flush is still pending must survive it.
+    const auto fresh = rampChunk(RendererBus::kPrimeFrames + 65, 7.0f, 0.0f);
+    bus.push(fresh.data(), RendererBus::kPrimeFrames + 65, 48000.0, 48000.0);
+
+    std::vector<float> dl(64), dr(64);
+    assert(bus.pull(dl.data(), dr.data(), 64) == 64
+           && "fresh post-re-enable audio must not be flushed away with the stale tail");
+    // Frame 0 is the resampler's one-frame interpolation carry (by design);
+    // everything after must be the fresh push, never the flushed 5.0 tail.
+    assert(dl[1] == 7.0f && "flush must drop only the pre-disable tail");
+}
+
 // Rate validation (PR #107 review): non-finite rates cross the JS/IPC
 // boundary; NaN passes a plain `<= 0` check, and a subnormal source rate can
 // underflow step to 0 — both must be rejected before the resample loop.
@@ -202,6 +231,7 @@ int main()
     testDisabledIsInert();
     testGainApplied();
     testFlushOnDisable();
+    testFlushSparesPostReEnableAudio();
     std::puts("renderer_bus: all cases passed");
     return 0;
 }

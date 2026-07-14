@@ -26,7 +26,12 @@ function writeImpulseWav(file) {
     fs.writeFileSync(file, buf);
 }
 
-const GARBAGE = [NaN, Infinity, -Infinity, -1, 1.5, 4097, 'x', null, undefined, {}, []];
+// NB 2**31 (not 4097): a slot id is a monotonic HANDLE from nextSlotId, which
+// clear() never resets, so a long session legitimately hands out ids past any
+// small ceiling — see the slot-id-handle test below. What must be rejected is
+// the NaN/Inf/fractional/negative/non-number class, plus ids that don't fit an
+// int32 at all.
+const GARBAGE = [NaN, Infinity, -Infinity, -1, 1.5, 2 ** 31, 'x', null, undefined, {}, []];
 
 test('chain-mutating bindings no-op on garbage args and never touch slot 0', { skip: !HAVE_ADDON && 'addon not built' }, async () => {
     const audio = require(ADDON);
@@ -67,6 +72,56 @@ test('chain-mutating bindings no-op on garbage args and never touch slot 0', { s
         const st = audio.getChainState();
         assert.equal(st[0]?.bypassed, true, 'valid call after fuzz must apply');
         audio.setBypass(1, false);
+    } finally {
+        await audio.clearChain?.();
+        audio.shutdown?.();
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+});
+
+// PR #107 review: slot ids are monotonic HANDLES (SignalChain::nextSlotId,
+// never reset by clear()), not bounded indices. A ceiling in the N-API arg
+// guard meant that once a session had created its 4096th processor — a few
+// hundred song loads / tone switches, each rebuilding a chainful — EVERY
+// guarded binding (setBypass, setParameter, remove/moveProcessor, open/close
+// PluginEditor) silently no-opped for the rest of the run, with no error.
+//
+// Deliberately slow (~40s): the only way to observe the bug through the public
+// surface is to actually push nextSlotId past the old ceiling and then drive a
+// real slot. Batched as 21 x 210-slot presets so only 210 IRLoaders are ever
+// live at once.
+test('slot ids are handles, not indices — bindings still work past the old 4096 ceiling',
+    { skip: !HAVE_ADDON && 'addon not built' }, async () => {
+    const audio = require(ADDON);
+    audio.init();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'slot-handle-'));
+    const ir = path.join(tmp, 'i.wav');
+    writeImpulseWav(ir);
+    const SLOTS = 210, LOADS = 21;   // 4410 ids > the old 4096 ceiling
+    try {
+        let slots = [];
+        for (let i = 0; i < LOADS; i++) {
+            const res = await audio.loadPreset(JSON.stringify({
+                chain: Array.from({ length: SLOTS }, (_, k) => ({
+                    type: 2, name: `handle-${k}`, path: ir, bypassed: false,
+                })),
+            }));
+            assert.ok(res?.success, `preset ${i} must load`);
+            slots = audio.getChainState();
+        }
+
+        const maxId = Math.max(...slots.map((s) => s.id));
+        assert.ok(maxId > 4096, `expected a slot id past the old ceiling, got ${maxId}`);
+
+        // The regression: with an index ceiling on the arg guard this was a
+        // silent no-op and bypassed stayed false.
+        audio.setBypass(maxId, true);
+        assert.equal(audio.getChainState().find((s) => s.id === maxId)?.bypassed, true,
+            'setBypass on a >4096 slot id must apply, not silently no-op');
+
+        await audio.removeProcessor(maxId);
+        assert.equal(audio.getChainState().find((s) => s.id === maxId), undefined,
+            'removeProcessor on a >4096 slot id must apply');
     } finally {
         await audio.clearChain?.();
         audio.shutdown?.();

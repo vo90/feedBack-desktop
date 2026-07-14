@@ -26,6 +26,7 @@
 #include <juce_core/juce_core.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -48,6 +49,27 @@ uint64_t currentChainGeneration();
 //   ... clear/rebuild/add ...
 //   const uint64_t gen = bumpChainGeneration();   // still under the lock
 //   (return gen in the result object)
+//
+// ...but ONLY from a libuv worker thread. NOTHING may take this mutex with a
+// blocking lock on the N-API/JS thread: LoadPresetWorker holds it across the
+// full clear+rebuild, which includes an unbounded in-process plugin init
+// (loadVstSandboxAware's done->wait() has no timeout — a slow first-run plugin
+// is allowed to take as long as it needs). A blocking lock on the JS thread
+// would therefore freeze the whole Electron main process — every IPC channel
+// with it — for the duration of a plugin load, and on macOS (where the N-API
+// thread IS the JUCE message thread — see AddonContext's startJuceMessageThread)
+// it would deadlock the very pump that load is waiting on. The message-thread
+// call sites in EditorWindows use try_to_lock for exactly this reason; the
+// synchronous chain mutators go through queueChainMutation instead.
+//
+// Run `mutate` on a libuv worker under chainMutationMutex(), bump the chain
+// generation, and resolve the returned promise with true (false if the engine
+// went away). When `releasesRebuildBarrier`, the worker calls endChainRebuild()
+// on every exit path — the caller must have armed it with beginChainRebuild()
+// before tearing editors down.
+Napi::Value queueChainMutation(Napi::Env env,
+                               std::function<void(AudioEngine&)> mutate,
+                               bool releasesRebuildBarrier = false);
 
 // ── Rebuild barrier (editor-open gate) ────────────────────────────────────
 // A chain clear/rebuild is a two-step dance: editors are torn down on the

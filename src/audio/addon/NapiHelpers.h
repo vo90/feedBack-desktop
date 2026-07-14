@@ -13,12 +13,13 @@
 #include <napi.h>
 
 #include <cmath>
+#include <limits>
 #include <optional>
 
 namespace slopsmith::addon {
 
 // Finite integer in [minV, maxV]. The 4096 default ceiling keeps the cast
-// well-defined for id-shaped args (slot ids, source ids, indices).
+// well-defined for index-shaped args (channel/branch indices and the like).
 inline std::optional<int> argInt(const Napi::CallbackInfo& info, size_t i,
                                  int minV = 0, int maxV = 4096)
 {
@@ -30,9 +31,19 @@ inline std::optional<int> argInt(const Napi::CallbackInfo& info, size_t i,
 }
 
 // Slot / source / param-index ids: finite non-negative integers.
+//
+// NOT bounded by argInt's 4096 index ceiling. A slot id is a monotonic HANDLE
+// from SignalChain::nextSlotId, which increments on every addProcessor and is
+// never reset by clear() — a long session (each song load and mid-song tone
+// switch rebuilds a chainful of slots) walks past 4096, and a ceiling here
+// would then make every guarded binding — setBypass, setParameter, remove/
+// moveProcessor, open/closePluginEditor — silently no-op for the rest of the
+// run. Ids that don't name a live slot are rejected by SignalChain's own
+// findSlotIndex; the job here is only to keep the NaN/Inf/fractional class out
+// (Int32Value() coerces NaN to 0, i.e. a real slot).
 inline std::optional<int> argSlotId(const Napi::CallbackInfo& info, size_t i)
 {
-    return argInt(info, i);
+    return argInt(info, i, 0, std::numeric_limits<int>::max());
 }
 
 // Finite float (parameter values, gains, pans). Range clamping stays with

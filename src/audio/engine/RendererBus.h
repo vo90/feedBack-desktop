@@ -48,6 +48,17 @@ public:
             // pull mid-drain could overwrite it with r + pull, replaying a
             // stale tail after re-enable, exactly what the drop was meant to
             // prevent. Only the consumer ever moves readIndex now.
+            //
+            // Snapshot WHERE to flush to rather than letting the consumer flush
+            // to whatever writeIndex it happens to see. If no output callback
+            // runs between this disable and a re-enable (a stopped device, a
+            // device swap), the next pull would otherwise discard the FRESH
+            // frames pushed since the re-enable along with the stale tail —
+            // silence until the bus re-primes. Pushes are gated on busEnabled,
+            // so nothing lands in (flushTo, re-enable) and this index is exactly
+            // the end of the stale tail.
+            flushTo.store(ring.writeIndex.load(std::memory_order_acquire),
+                          std::memory_order_relaxed);
             flushRequested.store(true, std::memory_order_release);
             primed.store(false, std::memory_order_relaxed);
         }
@@ -113,9 +124,18 @@ public:
     {
         // Consume a pending flush FIRST — even while disabled — so the tail
         // buffered before a disable is dropped by the ring's one legitimate
-        // readIndex writer (this consumer), never by the control thread.
+        // readIndex writer (this consumer), never by the control thread. Flush
+        // to the index captured at DISABLE time, not to the live writeIndex:
+        // anything pushed after a re-enable is fresh audio, not stale tail.
         if (flushRequested.exchange(false, std::memory_order_acq_rel))
-            ring.commitRead(ring.writeIndex.load(std::memory_order_acquire));
+        {
+            const uint64_t target = flushTo.load(std::memory_order_relaxed);
+            // Guard the already-drained case: the consumer may have run past
+            // the snapshot before it saw the flag, and readIndex must never
+            // move backwards.
+            if (target > ring.readIndex.load(std::memory_order_relaxed))
+                ring.commitRead(target);
+        }
         if (!busEnabled.load(std::memory_order_acquire)) return 0;
         const uint64_t w = ring.writeIndex.load(std::memory_order_acquire);
         uint64_t r = ring.readIndex.load(std::memory_order_relaxed);
@@ -209,7 +229,10 @@ private:
     std::atomic<bool> primed{false};
     // Set by setEnabled(false) on the control thread, consumed (exchange) by
     // pull() — the drop-on-disable request, honored by the single consumer.
+    // flushTo is the writeIndex as of that disable: the exact end of the stale
+    // tail, so a re-enable's fresh frames survive the pending flush.
     std::atomic<bool> flushRequested{false};
+    std::atomic<uint64_t> flushTo{0};
     // Producer-thread-only linear-resampler state (fractional read position
     // into the incoming chunk + the previous chunk's last frame for
     // interpolation continuity across pushes).

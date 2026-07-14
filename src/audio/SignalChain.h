@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <vector>
 
 // Represents a single processor slot in the signal chain.
 // Can hold a VST3/AU/LV2 plugin, NAM model, or IR loader.
@@ -95,7 +96,26 @@ public:
     // Info
     int getNumSlots() const;
     const ProcessorSlot* getSlot(int slotId) const;
-    juce::Array<const ProcessorSlot*> getAllSlots() const;
+    // Metadata for every slot, copied UNDER the lock. Replaces getAllSlots(),
+    // which handed raw ProcessorSlot* back to the caller after dropping the
+    // lock: getChainState() then dereferenced them (down to
+    // processor->hasEditor()) while a concurrent clear()/loadPreset could free
+    // the slots underneath — a read-side use-after-free on the very rebuild
+    // window the chain-mutation serializer exists to police.
+    struct SlotSummary
+    {
+        int id = 0;
+        int type = 0;
+        juce::String name;
+        juce::String path;
+        bool bypassed = false;
+        float pan = 0.0f;
+        int branch = 0;
+        int branchSrc = 0;
+        float postGain = 1.0f;
+        bool hasEditor = false;
+    };
+    std::vector<SlotSummary> getSlotSummaries() const;
     // Current prepared playback format — used to prepare a processor that is
     // swapped in mid-session (replaceProcessor) at the same rate as the chain.
     double getCurrentSampleRate() const { return currentSampleRate; }

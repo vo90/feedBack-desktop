@@ -20,38 +20,40 @@ namespace slopsmith::addon {
 
 // ── Signal Chain Management ──────────────────────────────────────────────────
 
-// Pending in-process loads: each LoadVSTWorker / LoadPresetWorker that's
-// currently blocked on `done->wait()` registers its event here. doShutdown
-// signals them all so the workers unblock and return a clean "cancelled"
-// error instead of hanging forever when the JUCE message thread is about
-// to be stopped (and any unfired callback would never arrive).
+// The chain mutators resolve a promise instead of returning synchronously: the
+// chain-mutation mutex can be held for the length of a plugin init, and waiting
+// for it on the JS thread would freeze the main process (see ChainOps.h). Every
+// caller already reaches these through ipcRenderer.invoke, so the await is free.
+static Napi::Value resolvedBool(Napi::Env env, bool value)
+{
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(Napi::Boolean::New(env, value));
+    return deferred.Promise();
+}
+
 Napi::Value RemoveProcessor(const Napi::CallbackInfo& info)
 {
     // Typed extractors (addon/NapiHelpers.h): NaN/Inf slot ids used to coerce
     // to slot 0 and mutate the wrong slot (deep-read §2) — now a clean no-op.
-    auto liveEngine = snapshotEngine();
+    auto env = info.Env();
     const auto slotId = slopsmith::addon::argSlotId(info, 0);
-    if (liveEngine && slotId)
-    {
-        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
-        liveEngine->getSignalChain().removeProcessor(*slotId);
-        slopsmith::addon::bumpChainGeneration();
-    }
-    return info.Env().Undefined();
+    if (!slotId) return resolvedBool(env, false);
+    const int id = *slotId;
+    return slopsmith::addon::queueChainMutation(env, [id](AudioEngine& eng) {
+        eng.getSignalChain().removeProcessor(id);
+    });
 }
 
 Napi::Value MoveProcessor(const Napi::CallbackInfo& info)
 {
-    auto liveEngine = snapshotEngine();
+    auto env = info.Env();
     const auto from = slopsmith::addon::argSlotId(info, 0);
     const auto to = slopsmith::addon::argSlotId(info, 1);
-    if (liveEngine && from && to)
-    {
-        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
-        liveEngine->getSignalChain().moveProcessor(*from, *to);
-        slopsmith::addon::bumpChainGeneration();
-    }
-    return info.Env().Undefined();
+    if (!from || !to) return resolvedBool(env, false);
+    const int f = *from, t = *to;
+    return slopsmith::addon::queueChainMutation(env, [f, t](AudioEngine& eng) {
+        eng.getSignalChain().moveProcessor(f, t);
+    });
 }
 
 Napi::Value SetBypass(const Napi::CallbackInfo& info)
@@ -74,35 +76,34 @@ Napi::Value SetBypass(const Napi::CallbackInfo& info)
 
 Napi::Value ClearChain(const Napi::CallbackInfo& info)
 {
+    auto env = info.Env();
+
     // Gate editor opens for the whole teardown+clear window (see the rebuild
     // barrier in ChainOps.h): without it, an editor opened between the
     // teardown below and the clear acquiring the mutex would point at a
     // processor the clear is about to free.
     slopsmith::addon::beginChainRebuild();
-    struct BarrierRelease {
-        ~BarrierRelease() { slopsmith::addon::endChainRebuild(); }
-    } barrierRelease;
 
-    // Tear editors down before their processors are freed just below (#56).
+    // Tear editors down before their processors are freed (#56). Must happen on
+    // THIS thread (main / message thread), not on the mutation worker: JUCE GUI
+    // objects may only be destroyed on the message thread.
     if (!closeAllPluginEditorWindows())
     {
         // Teardown refused/timed out: an editor may still be bound to a chain
         // processor. Clearing now would free it under the live editor — the
         // documented UAF. Skip the clear; the caller can retry.
+        slopsmith::addon::endChainRebuild();
         fprintf(stderr, "[audio-native] clearChain: editor teardown did not complete; "
                         "chain left untouched\n");
-        return info.Env().Undefined();
+        return resolvedBool(env, false);
     }
-    if (auto liveEngine = snapshotEngine())
-    {
-        // Serialized with the async chain workers (deep-read 1). May block
-        // briefly behind an in-flight preset/VST load -- that wait IS the fix
-        // for the interleaved clear-vs-rebuild corruption.
-        std::lock_guard<std::mutex> chainLock(slopsmith::addon::chainMutationMutex());
-        liveEngine->getSignalChain().clear();
-        slopsmith::addon::bumpChainGeneration();
-    }
-    return info.Env().Undefined();
+
+    // The worker now owns the barrier and releases it on every exit path. It
+    // takes the chain mutex on a libuv thread, so an in-flight preset/VST load
+    // delays the clear without blocking the JS thread behind it.
+    return slopsmith::addon::queueChainMutation(env, [](AudioEngine& eng) {
+        eng.getSignalChain().clear();
+    }, /*releasesRebuildBarrier=*/true);
 }
 
 // Stereo routing (St-1). setPan(slotId, -1..+1); setBranch(slotId, 0=trunk/>=1).
@@ -173,20 +174,23 @@ Napi::Value GetChainState(const Napi::CallbackInfo& info)
 
     if (liveEngine)
     {
-        auto slots = liveEngine->getSignalChain().getAllSlots();
-        for (int i = 0; i < slots.size(); ++i)
+        // Summaries are copied under SignalChain's lock — the old getAllSlots()
+        // handed back raw slot pointers that a concurrent clear()/loadPreset
+        // could free before this loop dereferenced them.
+        const auto slots = liveEngine->getSignalChain().getSlotSummaries();
+        for (size_t i = 0; i < slots.size(); ++i)
         {
             auto obj = Napi::Object::New(env);
-            obj.Set("id", slots[i]->id);
-            obj.Set("type", (int)slots[i]->type);
-            obj.Set("name", slots[i]->name.toStdString());
-            obj.Set("path", slots[i]->path.toStdString());
-            obj.Set("bypassed", slots[i]->bypassed);
-            obj.Set("pan", slots[i]->pan);
-            obj.Set("branch", slots[i]->branch);
-            obj.Set("branchSrc", slots[i]->branchSrc);
-            obj.Set("postGain", slots[i]->postGain);
-            obj.Set("hasEditor", slots[i]->processor && slots[i]->processor->hasEditor());
+            obj.Set("id", slots[i].id);
+            obj.Set("type", slots[i].type);
+            obj.Set("name", slots[i].name.toStdString());
+            obj.Set("path", slots[i].path.toStdString());
+            obj.Set("bypassed", slots[i].bypassed);
+            obj.Set("pan", slots[i].pan);
+            obj.Set("branch", slots[i].branch);
+            obj.Set("branchSrc", slots[i].branchSrc);
+            obj.Set("postGain", slots[i].postGain);
+            obj.Set("hasEditor", slots[i].hasEditor);
             result.Set((uint32_t)i, obj);
         }
     }
@@ -200,10 +204,10 @@ Napi::Value GetParameters(const Napi::CallbackInfo& info)
 {
     auto env = info.Env();
     auto liveEngine = snapshotEngine();
-    if (!liveEngine || info.Length() < 1) return Napi::Array::New(env);
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    if (!liveEngine || !slotId) return Napi::Array::New(env);
 
-    int slotId = info[0].As<Napi::Number>().Int32Value();
-    auto params = liveEngine->getSignalChain().getParameters(slotId);
+    auto params = liveEngine->getSignalChain().getParameters(*slotId);
     auto result = Napi::Array::New(env, params.size());
 
     for (int i = 0; i < params.size(); ++i)
@@ -235,19 +239,22 @@ Napi::Value SetParameter(const Napi::CallbackInfo& info)
 Napi::Value SetSlotState(const Napi::CallbackInfo& info)
 {
     // Type-guard both args (NAPI_DISABLE_CPP_EXCEPTIONS): a malformed IPC
-    // payload is a clean no-op rather than a hard addon failure.
+    // payload is a clean no-op rather than a hard addon failure. The slot id
+    // goes through argSlotId like every other mutator — IsNumber() is true for
+    // NaN, and Int32Value() would have coerced it to slot 0 and written this
+    // state onto a real slot (deep-read §2).
     auto liveEngine = snapshotEngine();
-    if (liveEngine && info.Length() >= 2 && info[0].IsNumber() && info[1].IsString())
+    const auto slotId = slopsmith::addon::argSlotId(info, 0);
+    if (liveEngine && slotId && info.Length() >= 2 && info[1].IsString())
     {
-        int slotId = info[0].As<Napi::Number>().Int32Value();
         auto base64 = info[1].As<Napi::String>().Utf8Value();
-        const auto* slot = liveEngine->getSignalChain().getSlot(slotId);
+        const auto* slot = liveEngine->getSignalChain().getSlot(*slotId);
         const bool allowStandard = slot != nullptr
             && (slot->type == ProcessorSlot::Type::IR
                 || slot->type == ProcessorSlot::Type::NAM);
         juce::MemoryBlock mb;
         if (decodeStateBlob(juce::String(base64), mb, allowStandard))
-            liveEngine->getSignalChain().setSlotState(slotId, mb);
+            liveEngine->getSignalChain().setSlotState(*slotId, mb);
     }
     return info.Env().Undefined();
 }
@@ -283,8 +290,12 @@ Napi::Value SetMultiBypass(const Napi::CallbackInfo& info)
         auto slotVal = item.Get("slotId");
         auto bypVal = item.Get("bypassed");
         if (!slotVal.IsNumber() || !bypVal.IsBoolean()) continue;
+        // Same rule as argSlotId: reject the NaN/Inf/fractional class, but do
+        // NOT impose an index ceiling — slot ids are monotonic handles, not
+        // indices (see NapiHelpers.h).
         const double raw = slotVal.As<Napi::Number>().DoubleValue();
-        if (!std::isfinite(raw) || raw != std::floor(raw) || raw < 0.0 || raw > 4096.0) continue;
+        if (!std::isfinite(raw) || raw != std::floor(raw)
+            || raw < 0.0 || raw > (double) std::numeric_limits<int>::max()) continue;
         changes.add({ (int) raw, bypVal.As<Napi::Boolean>().Value() });
     }
 
