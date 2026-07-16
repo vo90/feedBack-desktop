@@ -80,6 +80,14 @@ inline bool dispatchOnMessageThread(Func&& func)
 // closure must own everything it touches — capture by value (engine
 // snapshot, args) and write results through a shared_ptr, never through
 // references to the caller's stack.
+//
+// KNOWN LIMITATION (timeout desync): when the 15 s wait expires the binding
+// reports failure to JS, but the closure may still complete afterwards —
+// e.g. addSource returns -1 yet the source gets created, holding its input
+// device until the next reconfigure. Memory-safe by the capture rule above,
+// just not logically reconciled; only reachable with the message thread
+// jammed > 15 s. Callers that care can re-query engine state (listSources,
+// getCurrentDevice) after a reported failure.
 template <typename Func>
 inline bool runDeviceLifecycleOp(Func&& func)
 {

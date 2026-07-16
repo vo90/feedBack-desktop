@@ -126,9 +126,24 @@ Napi::Value ProbeDeviceOptions(const Napi::CallbackInfo& info)
         return obj;
     }
 
-    auto options = liveEngine->probeDeviceOptionsDual(
-        juce::String(inputType), juce::String(inputName),
-        juce::String(outputType), juce::String(outputName));
+    // Probing constructs + destroys short-lived ASIO device objects
+    // (DeviceSetup::probeDual / rateSupportedBy createDevice) — same
+    // create/destroy-off-the-message-thread pattern as the lifecycle ops, so
+    // it takes the same hop (PR #113 review finding 1). Query-only (never
+    // open()), but a probe ASIOAudioIODevice owns the same reset-timer
+    // machinery as the live one.
+    auto optionsPtr = std::make_shared<AudioEngine::DeviceOptions>();
+    if (!runDeviceLifecycleOp([liveEngine, inputType, inputName, outputType, outputName, optionsPtr] {
+            *optionsPtr = liveEngine->probeDeviceOptionsDual(
+                juce::String(inputType), juce::String(inputName),
+                juce::String(outputType), juce::String(outputName));
+        }))
+    {
+        obj.Set("error", "device probe did not complete (message thread unavailable or timed out)");
+        obj.Set("compatible", false);
+        return obj;
+    }
+    const auto& options = *optionsPtr;
     obj.Set("type", options.inputType.toStdString());      // legacy alias
     obj.Set("inputType", options.inputType.toStdString());
     obj.Set("outputType", options.outputType.toStdString());
