@@ -84,9 +84,15 @@ template <typename Func>
 inline bool runDeviceLifecycleOp(Func&& func)
 {
 #if JUCE_WINDOWS
-    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
-        if (!mm->isThisTheMessageThread())
-            return dispatchOnMessageThread(std::forward<Func>(func));
+    // No MessageManager means the pump is gone (pre-init or mid-shutdown):
+    // report failure instead of running the mutation unserialised on the
+    // caller's thread — that would reintroduce the race this helper exists
+    // to prevent (CodeRabbit #113 review).
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm == nullptr)
+        return false;
+    if (!mm->isThisTheMessageThread())
+        return dispatchOnMessageThread(std::forward<Func>(func));
 #endif
     func();
     return true;
