@@ -54,6 +54,44 @@ inline bool dispatchOnMessageThread(Func&& func)
     return dispatchOnMessageThreadImpl(std::function<void()>(std::forward<Func>(func)));
 }
 
+// Run a device-lifecycle mutation (anything that can create or destroy a
+// juce::AudioIODevice: setAudioDevices, start/stopAudio, device-type
+// switches, stream-output open/close, extra-input add/remove) on the JUCE
+// message thread.
+//
+// Why: on Windows, ASIO devices arm juce::Timers (the driver's deferred
+// kAsioResetRequest, device-change detection) that fire on the message
+// thread. Destroying the device from the Node thread while such a timer is
+// queued or mid-callback is a use-after-free — tester crash 2026-07-15:
+// ASIOAudioIODevice::timerCallback → reloadChannelNames on a freed device,
+// ~5 min after start, every run (Focusrite USB ASIO reset request).
+// Hopping the mutation onto the message thread serialises it with those
+// timer callbacks, so a timer can never observe a half-destroyed device.
+//
+// Windows-only hop, by design: macOS's dispatchOnMessageThread already runs
+// inline (no separate pump), and Linux/ALSA keeps its long-standing
+// "called from the Node main thread" contract untouched. Inline when the
+// caller already IS the message thread (engine init runs there), because
+// dispatch-and-wait from the message thread would deadlock.
+//
+// Returns false when the dispatched work did not verifiably complete (post
+// refused or 15 s timeout) — same contract as dispatchOnMessageThread.
+// CAPTURE RULE: on timeout the queued closure may still run later, so the
+// closure must own everything it touches — capture by value (engine
+// snapshot, args) and write results through a shared_ptr, never through
+// references to the caller's stack.
+template <typename Func>
+inline bool runDeviceLifecycleOp(Func&& func)
+{
+#if JUCE_WINDOWS
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating())
+        if (!mm->isThisTheMessageThread())
+            return dispatchOnMessageThread(std::forward<Func>(func));
+#endif
+    func();
+    return true;
+}
+
 // Pending-async-load registry: LoadVSTWorker / LoadPresetWorker block on a
 // WaitableEvent until the message-thread continuation fires; doShutdown
 // signals every registered event so no worker waits forever once the pump
