@@ -303,6 +303,23 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             .replace(/^-+|-+$/g, '') || 'default';
     }
 
+    // The ONE place a named input's logical source key is built. Both the
+    // registration side (registerAudioSessionInputSources) and the selection
+    // side (syncSelectedInputSource) must emit byte-identical keys or a synced
+    // selection silently resolves to nothing — so they share this, rather than
+    // each formatting the string and drifting apart.
+    //
+    // Returns '' for a device with no name. Callers decide what that means:
+    // registration has an index and falls back to a positional key; the
+    // Settings dropdown does NOT (its "Default" option is also value=""), so it
+    // must not guess. See syncSelectedInputSource.
+    function inputSourceNameKey(typeName, deviceName) {
+        const realName = String(deviceName || '').trim();
+        return realName
+            ? `desktop-audio:${safeKeyPart(typeName)}:input:name:${encodeURIComponent(realName)}`
+            : '';
+    }
+
     function currentAudioDeviceSnapshot() {
         return {
             inputType: deviceTypeSelect?.value || '',
@@ -423,12 +440,20 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // start) calls audioInputOpenHandler with the stale key — clobbering
     // the engine back to the dead device mid-session.
     function syncSelectedInputSource(inputType, inputDevice) {
-        const realName = String(inputDevice || '').trim();
-        const key = realName
-            ? `desktop-audio:${safeKeyPart(inputType)}:input:name:${encodeURIComponent(realName)}`
-            : '';
+        const key = inputSourceNameKey(inputType, inputDevice);
+        // No key means the input dropdown is on "Default" (its option value is
+        // literally ""), which expresses no opinion about WHICH source the user
+        // wants — the engine just opens the OS default. It is NOT a signal to
+        // drop the capability's selection: that selection is made in a
+        // different UI (the input_setup / tuner picker), so clearing it here
+        // would delete a device the user explicitly chose elsewhere, on every
+        // startup via init's auto-apply. And the open handler deliberately
+        // refuses to guess a device, so a cleared selection leaves plugins with
+        // no input at all — the same dead-guitar symptom this function exists
+        // to prevent. Leave it alone and let the picker own it.
+        if (!key) return;
         const audioSession = window.slopsmith && window.slopsmith.audioSession;
-        if (key && audioSession && typeof audioSession.selectInputSource === 'function') {
+        if (audioSession && typeof audioSession.selectInputSource === 'function') {
             try {
                 const res = audioSession.selectInputSource({ logicalSourceKey: key }, 'audio_engine');
                 if (res && res.outcome === 'handled') return;
@@ -436,14 +461,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 console.warn('[audio-engine] selectInputSource sync failed:', e);
             }
         }
-        // The capability isn't loaded (or the source isn't registered yet) —
-        // rewrite the persisted key directly so the stale selection still
-        // can't clobber the device at the next open. A nameless device has
-        // no stable key, so invalidate rather than guess.
+        // Capability not loaded, or loaded but this source isn't registered yet
+        // (selectInputSource degrades when it can't resolve the key). Persist
+        // the key directly so the stale selection can't clobber the device on a
+        // later run. NOTE: this does NOT clear an already-loaded capability's
+        // in-memory selection — nothing here can reach it — so within THIS
+        // session a stale in-memory selection can still win. The convergence is
+        // for the next open after a reload.
         try {
-            if (key) window.localStorage.setItem('feedBack.audioInput.selectedLogicalSourceKey', key);
-            else window.localStorage.removeItem('feedBack.audioInput.selectedLogicalSourceKey');
-        } catch (_) { /* storage unavailable — nothing to invalidate */ }
+            window.localStorage.setItem('feedBack.audioInput.selectedLogicalSourceKey', key);
+        } catch (_) { /* storage unavailable — nothing to persist */ }
     }
 
     function registerAudioSessionInputSources() {
@@ -480,7 +507,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 // resolves those positionally, but the picker now lists this device
                 // under its name key, so a returning user re-picks once.
                 const logicalSourceKey = hasRealName
-                    ? `desktop-audio:${safeKeyPart(typeName)}:input:name:${encodeURIComponent(realName)}`
+                    ? inputSourceNameKey(typeName, realName)
                     : `desktop-audio:${safeKeyPart(typeName)}:input:${index}`;
                 audioSession.registerInputSource({
                     sourceId: `audio_engine:${logicalSourceKey}`,
