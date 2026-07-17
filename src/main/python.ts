@@ -11,7 +11,11 @@ import * as net from 'net';
 import * as os from 'os';
 import { getActiveSoundfontPath, getDesktopConfig } from './soundfont-manager';
 import { isDebugEnabled } from './debug-log';
-import { normalizeExplicitLibraryPath, prepareLibraryPathForPython } from './library-path-config';
+import {
+    applyLibraryPathToPythonEnvironment,
+    normalizeExistingLibraryDirectory,
+    prepareLibraryPathForPython,
+} from './library-path-config';
 
 let pythonProcess: ChildProcess | null = null;
 // A backend that is being *gracefully* stopped (SIGTERM sent, async SIGKILL
@@ -424,7 +428,7 @@ function getPluginsDir(): string {
     return pluginsDir;
 }
 
-function getDLCDir(explicitDlcDir = normalizeExplicitLibraryPath(process.env.DLC_DIR)): string {
+function getDLCDir(explicitDlcDir = normalizeExistingLibraryDirectory(process.env.DLC_DIR)): string {
     if (explicitDlcDir) return explicitDlcDir;
 
     // Read from shared config
@@ -497,7 +501,7 @@ export async function startPython(): Promise<void> {
     }
     serverPort = await findPort(PREFERRED_PORT);
     const configDir = getConfigDir();
-    const explicitDlcDir = normalizeExplicitLibraryPath(process.env.DLC_DIR);
+    const explicitDlcDir = normalizeExistingLibraryDirectory(process.env.DLC_DIR);
     const dlcDir = getDLCDir(explicitDlcDir);
     // Ensure the resolved library folder exists before the server starts. The
     // Python side only seeds starter content (and scans) when DLC_DIR.is_dir()
@@ -582,13 +586,9 @@ export async function startPython(): Promise<void> {
             : path.join(__dirname, '..', '..', 'resources', 'bin') + path.delimiter
         ) + (process.env.PATH || ''),
     };
-    if (libraryPath.environmentDlcDir) {
-        pythonEnv.DLC_DIR = libraryPath.environmentDlcDir;
-    } else {
-        // `...process.env` may carry an empty/invalid value. Do not let it
-        // shadow config.json in the normal dynamic-settings path.
-        delete pythonEnv.DLC_DIR;
-    }
+    // `...process.env` may carry an empty/invalid value. Do not let it shadow
+    // config.json in the normal dynamic-settings path.
+    applyLibraryPathToPythonEnvironment(pythonEnv, libraryPath);
 
     // Debug mode: raise the Slopsmith server's log level and tee its
     // structured logs to a file. lib/logging_setup.py reads LOG_LEVEL and

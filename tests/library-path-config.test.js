@@ -5,10 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { loadTs, ROOT } = require('./_load-ts');
+const { loadTs } = require('./_load-ts');
 
 const {
-    normalizeExplicitLibraryPath,
+    applyLibraryPathToPythonEnvironment,
+    normalizeExistingLibraryDirectory,
     prepareLibraryPathForPython,
 } = loadTs('src/main/library-path-config.ts');
 
@@ -45,16 +46,45 @@ test('bootstrap merges the fallback into an existing config without losing setti
 test('an existing saved library stays config-owned and can change between scans', () => {
     const configDir = tmpConfigDir();
     const configFile = path.join(configDir, 'config.json');
-    fs.writeFileSync(configFile, JSON.stringify({ dlc_dir: 'D:\\Saved Songs' }));
+    const savedSongs = path.join(configDir, 'Saved Songs');
+    fs.mkdirSync(savedSongs);
+    fs.writeFileSync(configFile, JSON.stringify({ dlc_dir: savedSongs }));
 
     const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
 
     assert.deepEqual(result, { status: 'configured' });
     assert.deepEqual(
         JSON.parse(fs.readFileSync(configFile, 'utf8')),
-        { dlc_dir: 'D:\\Saved Songs' },
+        { dlc_dir: savedSongs },
     );
     assert.equal(result.environmentDlcDir, undefined);
+});
+
+test('a missing saved library is reported without overwriting the intended path', () => {
+    const configDir = tmpConfigDir();
+    const configFile = path.join(configDir, 'config.json');
+    const missingSongs = path.join(configDir, 'Disconnected Songs');
+    fs.writeFileSync(configFile, JSON.stringify({ dlc_dir: missingSongs }));
+
+    const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
+
+    assert.equal(result.status, 'invalid-config');
+    assert.match(result.error, /not an existing directory/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { dlc_dir: missingSongs });
+});
+
+test('a saved library file is rejected without overwriting the configured value', () => {
+    const configDir = tmpConfigDir();
+    const configFile = path.join(configDir, 'config.json');
+    const file = path.join(configDir, 'not-a-library');
+    fs.writeFileSync(file, 'x');
+    fs.writeFileSync(configFile, JSON.stringify({ dlc_dir: file }));
+
+    const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
+
+    assert.equal(result.status, 'invalid-config');
+    assert.match(result.error, /not an existing directory/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { dlc_dir: file });
 });
 
 test('an explicit valid DLC_DIR remains an environment override', () => {
@@ -79,9 +109,9 @@ test('an explicit DLC_DIR rejects whitespace, files, and missing paths', () => {
     const file = path.join(root, 'not-a-directory');
     fs.writeFileSync(file, 'x');
 
-    assert.equal(normalizeExplicitLibraryPath('   '), undefined);
-    assert.equal(normalizeExplicitLibraryPath(file), undefined);
-    assert.equal(normalizeExplicitLibraryPath(path.join(root, 'missing')), undefined);
+    assert.equal(normalizeExistingLibraryDirectory('   '), undefined);
+    assert.equal(normalizeExistingLibraryDirectory(file), undefined);
+    assert.equal(normalizeExistingLibraryDirectory(path.join(root, 'missing')), undefined);
 });
 
 test('an explicit DLC_DIR is trimmed before directory validation', () => {
@@ -89,7 +119,7 @@ test('an explicit DLC_DIR is trimmed before directory validation', () => {
     const directory = path.join(root, 'Managed Songs');
     fs.mkdirSync(directory);
 
-    assert.equal(normalizeExplicitLibraryPath(`  ${directory}  `), directory);
+    assert.equal(normalizeExistingLibraryDirectory(`  ${directory}  `), directory);
 });
 
 test('a corrupt config is never overwritten during bootstrap', () => {
@@ -104,12 +134,40 @@ test('a corrupt config is never overwritten during bootstrap', () => {
     assert.equal(fs.readFileSync(configFile, 'utf8'), '{broken');
 });
 
-test('python startup does not pin its resolved fallback as DLC_DIR', () => {
-    const source = fs.readFileSync(path.join(ROOT, 'src', 'main', 'python.ts'), 'utf8');
+test('Python environment omits DLC_DIR when config owns the library path', () => {
+    const environment = { DLC_DIR: 'C:\\Stale Parent Value', KEEP: 'yes' };
 
-    assert.match(source, /normalizeExplicitLibraryPath\(process\.env\.DLC_DIR\)/);
-    assert.doesNotMatch(source, /existsSync\(process\.env\.DLC_DIR\)/);
-    assert.match(source, /prepareLibraryPathForPython\(configDir, dlcDir, explicitDlcDir\)/);
-    assert.doesNotMatch(source, /DLC_DIR:\s*dlcDir/);
-    assert.match(source, /delete pythonEnv\.DLC_DIR/);
+    applyLibraryPathToPythonEnvironment(environment, { status: 'configured' });
+
+    assert.deepEqual(environment, { KEEP: 'yes' });
+});
+
+test('Python environment exports only a validated explicit DLC_DIR', () => {
+    const configDir = tmpConfigDir();
+    const managedSongs = path.join(configDir, 'Managed Songs');
+    fs.mkdirSync(managedSongs);
+    const preparation = prepareLibraryPathForPython(
+        configDir,
+        'C:\\Default Songs',
+        ` ${managedSongs} `,
+    );
+    const environment = { DLC_DIR: 'C:\\Stale Parent Value', KEEP: 'yes' };
+
+    applyLibraryPathToPythonEnvironment(environment, preparation);
+
+    assert.deepEqual(environment, { DLC_DIR: managedSongs, KEEP: 'yes' });
+});
+
+test('Python environment removes an invalid explicit DLC_DIR', () => {
+    const configDir = tmpConfigDir();
+    const fallback = path.join(configDir, 'Fallback Songs');
+    fs.mkdirSync(fallback);
+    const file = path.join(configDir, 'not-a-directory');
+    fs.writeFileSync(file, 'x');
+    const preparation = prepareLibraryPathForPython(configDir, fallback, file);
+    const environment = { DLC_DIR: file };
+
+    applyLibraryPathToPythonEnvironment(environment, preparation);
+
+    assert.deepEqual(environment, {});
 });

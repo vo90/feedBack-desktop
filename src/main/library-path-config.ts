@@ -19,10 +19,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Normalize an administrator-supplied DLC_DIR and accept it only when it
- * already names a directory. Invalid overrides must not shadow config.json.
+ * Normalize a configured library path and accept it only when it already
+ * names a directory.
  */
-export function normalizeExplicitLibraryPath(rawPath?: string): string | undefined {
+export function normalizeExistingLibraryDirectory(rawPath?: string): string | undefined {
     const candidate = (rawPath || '').trim();
     if (!candidate) return undefined;
 
@@ -30,6 +30,22 @@ export function normalizeExplicitLibraryPath(rawPath?: string): string | undefin
         return fs.statSync(candidate).isDirectory() ? candidate : undefined;
     } catch {
         return undefined;
+    }
+}
+
+/**
+ * Apply the prepared library-path contract to the Python child environment.
+ * Starting from a copy of process.env means an invalid or stale parent value
+ * must be removed explicitly when config.json owns the path.
+ */
+export function applyLibraryPathToPythonEnvironment(
+    environment: Record<string, string>,
+    preparation: LibraryPathPreparation,
+): void {
+    if (preparation.environmentDlcDir) {
+        environment.DLC_DIR = preparation.environmentDlcDir;
+    } else {
+        delete environment.DLC_DIR;
     }
 }
 
@@ -46,7 +62,7 @@ export function prepareLibraryPathForPython(
     resolvedDlcDir: string,
     explicitDlcDir?: string,
 ): LibraryPathPreparation {
-    const override = normalizeExplicitLibraryPath(explicitDlcDir);
+    const override = normalizeExistingLibraryDirectory(explicitDlcDir);
     if (override) {
         return {
             status: 'explicit-override',
@@ -76,7 +92,13 @@ export function prepareLibraryPathForPython(
 
         const configured = config.dlc_dir;
         if (typeof configured === 'string' && configured.trim()) {
-            return { status: 'configured' };
+            if (normalizeExistingLibraryDirectory(configured)) {
+                return { status: 'configured' };
+            }
+            return {
+                status: 'invalid-config',
+                error: 'config.json dlc_dir is not an existing directory',
+            };
         }
         if (configured !== undefined && configured !== null && configured !== '') {
             return {
