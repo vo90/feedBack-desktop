@@ -8,6 +8,7 @@ const path = require('node:path');
 const { loadTs, ROOT } = require('./_load-ts');
 
 const {
+    normalizeExplicitLibraryPath,
     prepareLibraryPathForPython,
 } = loadTs('src/main/library-path-config.ts');
 
@@ -58,17 +59,37 @@ test('an existing saved library stays config-owned and can change between scans'
 
 test('an explicit valid DLC_DIR remains an environment override', () => {
     const configDir = tmpConfigDir();
+    const managedSongs = path.join(configDir, 'Managed Songs');
+    fs.mkdirSync(managedSongs);
     const result = prepareLibraryPathForPython(
         configDir,
         'C:\\Default Songs',
-        ' D:\\Managed Songs ',
+        ` ${managedSongs} `,
     );
 
     assert.deepEqual(result, {
         status: 'explicit-override',
-        environmentDlcDir: 'D:\\Managed Songs',
+        environmentDlcDir: managedSongs,
     });
     assert.equal(fs.existsSync(path.join(configDir, 'config.json')), false);
+});
+
+test('an explicit DLC_DIR rejects whitespace, files, and missing paths', () => {
+    const root = tmpConfigDir();
+    const file = path.join(root, 'not-a-directory');
+    fs.writeFileSync(file, 'x');
+
+    assert.equal(normalizeExplicitLibraryPath('   '), undefined);
+    assert.equal(normalizeExplicitLibraryPath(file), undefined);
+    assert.equal(normalizeExplicitLibraryPath(path.join(root, 'missing')), undefined);
+});
+
+test('an explicit DLC_DIR is trimmed before directory validation', () => {
+    const root = tmpConfigDir();
+    const directory = path.join(root, 'Managed Songs');
+    fs.mkdirSync(directory);
+
+    assert.equal(normalizeExplicitLibraryPath(`  ${directory}  `), directory);
 });
 
 test('a corrupt config is never overwritten during bootstrap', () => {
@@ -86,6 +107,8 @@ test('a corrupt config is never overwritten during bootstrap', () => {
 test('python startup does not pin its resolved fallback as DLC_DIR', () => {
     const source = fs.readFileSync(path.join(ROOT, 'src', 'main', 'python.ts'), 'utf8');
 
+    assert.match(source, /normalizeExplicitLibraryPath\(process\.env\.DLC_DIR\)/);
+    assert.doesNotMatch(source, /existsSync\(process\.env\.DLC_DIR\)/);
     assert.match(source, /prepareLibraryPathForPython\(configDir, dlcDir, explicitDlcDir\)/);
     assert.doesNotMatch(source, /DLC_DIR:\s*dlcDir/);
     assert.match(source, /delete pythonEnv\.DLC_DIR/);

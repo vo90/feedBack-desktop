@@ -19,6 +19,21 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Normalize an administrator-supplied DLC_DIR and accept it only when it
+ * already names a directory. Invalid overrides must not shadow config.json.
+ */
+export function normalizeExplicitLibraryPath(rawPath?: string): string | undefined {
+    const candidate = (rawPath || '').trim();
+    if (!candidate) return undefined;
+
+    try {
+        return fs.statSync(candidate).isDirectory() ? candidate : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Prepare the library path contract for the Python backend.
  *
  * An explicit DLC_DIR remains an administrator-owned environment override.
@@ -31,7 +46,7 @@ export function prepareLibraryPathForPython(
     resolvedDlcDir: string,
     explicitDlcDir?: string,
 ): LibraryPathPreparation {
-    const override = (explicitDlcDir || '').trim();
+    const override = normalizeExplicitLibraryPath(explicitDlcDir);
     if (override) {
         return {
             status: 'explicit-override',

@@ -11,7 +11,7 @@ import * as net from 'net';
 import * as os from 'os';
 import { getActiveSoundfontPath, getDesktopConfig } from './soundfont-manager';
 import { isDebugEnabled } from './debug-log';
-import { prepareLibraryPathForPython } from './library-path-config';
+import { normalizeExplicitLibraryPath, prepareLibraryPathForPython } from './library-path-config';
 
 let pythonProcess: ChildProcess | null = null;
 // A backend that is being *gracefully* stopped (SIGTERM sent, async SIGKILL
@@ -424,8 +424,8 @@ function getPluginsDir(): string {
     return pluginsDir;
 }
 
-function getDLCDir(): string {
-    if (process.env.DLC_DIR && fs.existsSync(process.env.DLC_DIR)) return process.env.DLC_DIR;
+function getDLCDir(explicitDlcDir = normalizeExplicitLibraryPath(process.env.DLC_DIR)): string {
+    if (explicitDlcDir) return explicitDlcDir;
 
     // Read from shared config
     const configFile = path.join(getConfigDir(), 'config.json');
@@ -497,7 +497,8 @@ export async function startPython(): Promise<void> {
     }
     serverPort = await findPort(PREFERRED_PORT);
     const configDir = getConfigDir();
-    const dlcDir = getDLCDir();
+    const explicitDlcDir = normalizeExplicitLibraryPath(process.env.DLC_DIR);
+    const dlcDir = getDLCDir(explicitDlcDir);
     // Ensure the resolved library folder exists before the server starts. The
     // Python side only seeds starter content (and scans) when DLC_DIR.is_dir()
     // is true, and it can't bootstrap the folder itself (the seed's mkdir runs
@@ -514,9 +515,6 @@ export async function startPython(): Promise<void> {
     // instead. The backend re-reads that file for every scan, so a path saved in
     // Settings takes effect immediately rather than being shadowed by the
     // startup path until the Python process restarts.
-    const explicitDlcDir = process.env.DLC_DIR && fs.existsSync(process.env.DLC_DIR)
-        ? process.env.DLC_DIR
-        : undefined;
     const libraryPath = prepareLibraryPathForPython(configDir, dlcDir, explicitDlcDir);
     if (libraryPath.error) {
         console.warn(`[python] could not prepare dynamic library path (${libraryPath.status}): ${libraryPath.error}`);
