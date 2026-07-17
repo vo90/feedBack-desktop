@@ -134,6 +134,49 @@ test('a corrupt config is never overwritten during bootstrap', () => {
     assert.equal(fs.readFileSync(configFile, 'utf8'), '{broken');
 });
 
+test('invalid-config exports the resolved fallback so the backend keeps a library', () => {
+    // The backend has no built-in default (_get_dlc_dir returns None): with
+    // the env var deleted AND config.json unusable, scans and starter
+    // seeding would silently skip. Failure statuses must keep the pre-#117
+    // env fallback.
+    const configDir = tmpConfigDir();
+    const configFile = path.join(configDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ dlc_dir: path.join(configDir, 'gone') }));
+
+    const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
+
+    assert.equal(result.status, 'invalid-config');
+    assert.equal(result.environmentDlcDir, 'C:\\Default Songs');
+
+    const environment = {};
+    applyLibraryPathToPythonEnvironment(environment, result);
+    assert.deepEqual(environment, { DLC_DIR: 'C:\\Default Songs' });
+});
+
+test('corrupt config exports the resolved fallback without being overwritten', () => {
+    const configDir = tmpConfigDir();
+    const configFile = path.join(configDir, 'config.json');
+    fs.writeFileSync(configFile, '{broken');
+
+    const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
+
+    assert.equal(result.status, 'invalid-config');
+    assert.equal(result.environmentDlcDir, 'C:\\Default Songs');
+    assert.equal(fs.readFileSync(configFile, 'utf8'), '{broken');
+});
+
+test('write-failed exports the resolved fallback so the backend keeps a library', () => {
+    // Force the config write to fail by making config.json's parent a file.
+    const root = tmpConfigDir();
+    const configDir = path.join(root, 'not-a-dir');
+    fs.writeFileSync(configDir, 'x');
+
+    const result = prepareLibraryPathForPython(configDir, 'C:\\Default Songs');
+
+    assert.equal(result.status, 'write-failed');
+    assert.equal(result.environmentDlcDir, 'C:\\Default Songs');
+});
+
 test('Python environment omits DLC_DIR when config owns the library path', () => {
     const environment = { DLC_DIR: 'C:\\Stale Parent Value', KEEP: 'yes' };
 

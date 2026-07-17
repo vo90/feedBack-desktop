@@ -56,6 +56,12 @@ export function applyLibraryPathToPythonEnvironment(
  * Normal desktop launches instead keep the selected path in config.json so
  * the backend can re-read a Settings change on the next manual scan without
  * requiring a process restart.
+ *
+ * Failure statuses (invalid-config, write-failed) still export the resolved
+ * fallback as DLC_DIR: the backend has NO built-in default (_get_dlc_dir
+ * returns None), so removing the env var when config.json cannot own the
+ * path would strand the user with an empty library and only a console warn.
+ * Config-owned dynamic behaviour applies exactly when config.json is usable.
  */
 export function prepareLibraryPathForPython(
     configDir: string,
@@ -79,6 +85,7 @@ export function prepareLibraryPathForPython(
             if (!isPlainObject(parsed)) {
                 return {
                     status: 'invalid-config',
+                    environmentDlcDir: resolvedDlcDir,
                     error: 'config.json is not a JSON object',
                 };
             }
@@ -86,6 +93,7 @@ export function prepareLibraryPathForPython(
         } catch (err) {
             return {
                 status: 'invalid-config',
+                environmentDlcDir: resolvedDlcDir,
                 error: err instanceof Error ? err.message : String(err),
             };
         }
@@ -97,12 +105,14 @@ export function prepareLibraryPathForPython(
             }
             return {
                 status: 'invalid-config',
+                environmentDlcDir: resolvedDlcDir,
                 error: 'config.json dlc_dir is not an existing directory',
             };
         }
         if (configured !== undefined && configured !== null && configured !== '') {
             return {
                 status: 'invalid-config',
+                environmentDlcDir: resolvedDlcDir,
                 error: 'config.json dlc_dir is not a string',
             };
         }
@@ -120,6 +130,7 @@ export function prepareLibraryPathForPython(
         } catch { /* best-effort temporary-file cleanup */ }
         return {
             status: 'write-failed',
+            environmentDlcDir: resolvedDlcDir,
             error: err instanceof Error ? err.message : String(err),
         };
     }
