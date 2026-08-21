@@ -103,6 +103,18 @@ async function findPort(startPort: number): Promise<number> {
 }
 
 function findPythonExecutable(): string {
+    // Allow development runtimes to select their own isolated Python. If an
+    // override is present, fail loudly instead of silently using a system
+    // interpreter with a different dependency set.
+    const configuredPython = process.env.FEEDBACK_PYTHON_PATH?.trim();
+    if (configuredPython) {
+        const resolvedPython = path.resolve(configuredPython);
+        if (!fs.existsSync(resolvedPython)) {
+            throw new Error(`FEEDBACK_PYTHON_PATH does not exist: ${resolvedPython}`);
+        }
+        return resolvedPython;
+    }
+
     // In packaged app, look for bundled Python
     if (app.isPackaged) {
         const resourcesPath = process.resourcesPath;
@@ -122,9 +134,15 @@ function findPythonExecutable(): string {
         }
     }
 
-    // Development: check for local venv first
-    const venvPython = path.join(__dirname, '..', '..', '.venv', 'bin', 'python3');
-    if (fs.existsSync(venvPython)) return venvPython;
+    // Development: check for a local venv on Windows and Unix-like systems.
+    const developmentCandidates = [
+        path.join(__dirname, '..', '..', '.venv', 'Scripts', 'python.exe'),
+        path.join(__dirname, '..', '..', '.venv', 'bin', 'python3'),
+        path.join(__dirname, '..', '..', '.venv', 'bin', 'python'),
+    ];
+    for (const candidate of developmentCandidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
 
     return 'python3';
 }
