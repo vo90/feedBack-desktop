@@ -9,7 +9,6 @@ import { app } from 'electron';
 import * as http from 'http';
 import * as net from 'net';
 import * as os from 'os';
-import { randomBytes } from 'crypto';
 import { getActiveSoundfontPath, getDesktopConfig } from './soundfont-manager';
 import { isDebugEnabled } from './debug-log';
 import {
@@ -17,11 +16,6 @@ import {
     normalizeExistingLibraryDirectory,
     prepareLibraryPathForPython,
 } from './library-path-config';
-import {
-    DIRECTORY_GRANT_SECRET_ENV,
-    registerDirectoryGrantWithBackend,
-    type BackendDirectoryGrantRegistration,
-} from './directory-grant-client';
 
 let pythonProcess: ChildProcess | null = null;
 // A backend that is being *gracefully* stopped (SIGTERM sent, async SIGKILL
@@ -49,43 +43,9 @@ let startupError: string | null = null;
 // alone is not enough, since the child can log "startup complete" and then
 // exit before the probe succeeds.
 let startupComplete = false;
-// Fresh for every managed backend spawn. It stays in Electron main + the
-// child's environment and is never exposed through preload to the renderer.
-let directoryGrantSecret = '';
-// Changes at every backend lifecycle boundary. In-flight registrations capture
-// this generation and cannot return a token minted by a process being replaced.
-let directoryGrantBackendGeneration = 0;
 
 export function getPythonPort(): number {
     return serverPort;
-}
-
-export async function registerDirectoryGrant(
-    directoryPath: string,
-    owner: string,
-    purpose: string,
-): Promise<BackendDirectoryGrantRegistration> {
-    const secret = directoryGrantSecret;
-    const child = pythonProcess;
-    const port = serverPort;
-    const generation = directoryGrantBackendGeneration;
-    if (!secret || !child || !startupComplete) {
-        throw new Error('Directory grant backend is unavailable.');
-    }
-    return registerDirectoryGrantWithBackend({
-        port,
-        secret,
-        owner,
-        purpose,
-        directoryPath,
-        isBackendCurrent: () => (
-            directoryGrantBackendGeneration === generation
-            && directoryGrantSecret === secret
-            && pythonProcess === child
-            && serverPort === port
-            && startupComplete
-        ),
-    });
 }
 
 // Interface the backend binds. Default loopback (127.0.0.1); 0.0.0.0 (all
@@ -519,10 +479,8 @@ function getDLCDir(explicitDlcDir = normalizeExistingLibraryDirectory(process.en
 }
 
 export async function startPython(): Promise<void> {
-    directoryGrantBackendGeneration += 1;
     startupError = null;
     startupComplete = false;
-    directoryGrantSecret = '';
     const slopsmithDir = findSlopsmithDir();
     const serverScript = path.join(slopsmithDir, 'server.py');
 
@@ -628,11 +586,6 @@ export async function startPython(): Promise<void> {
     const homeDir = app.getPath('home');
     const cacheBase = process.env.XDG_CACHE_HOME || path.join(homeDir, '.cache');
 
-    // Authorize exactly this managed backend run to accept native directory
-    // selections from Electron main. Override (never inherit) any parent value.
-    const grantSecretForChild = randomBytes(32).toString('base64url');
-    directoryGrantSecret = grantSecretForChild;
-
     // Build environment for Python process
     const pythonEnv: Record<string, string> = {
         ...process.env as Record<string, string>,
@@ -643,7 +596,6 @@ export async function startPython(): Promise<void> {
         XDG_CACHE_HOME: cacheBase,
         TORCH_HOME: process.env.TORCH_HOME || path.join(cacheBase, 'torch'),
         HF_HOME: process.env.HF_HOME || path.join(cacheBase, 'huggingface'),
-        [DIRECTORY_GRANT_SECRET_ENV]: grantSecretForChild,
         RESOURCESPATH: app.isPackaged
             ? process.resourcesPath
             : path.join(__dirname, '..', '..', 'resources'),
@@ -743,31 +695,25 @@ export async function startPython(): Promise<void> {
     if (bindHost !== '127.0.0.1') {
         console.log(`[python] LAN access enabled — binding ${bindHost} (reachable from other devices on the network)`);
     }
-    let child: ChildProcess;
-    try {
-        child = spawn(pythonPath, [
-            '-m', 'uvicorn', 'server:app',
-            '--host', bindHost,
-            '--port', String(serverPort),
-            '--no-access-log',
-        ], {
-            cwd: slopsmithDir,
-            env: pythonEnv,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            // POSIX: give the child its own process group so stopPython() can kill
-            // the whole tree (uvicorn can spawn worker/reloader children). Without
-            // this, a plain kill leaves orphans holding the server port — the next
-            // launch then drifts to 18001+, changing the renderer origin and
-            // wiping origin-keyed localStorage (plugin settings reset every start).
-            // The handle is deliberately NOT unref()'d — the main process keeps
-            // tracking the child so shutdown() / stopPython() can terminate it
-            // (detached only controls the process group, not the child's lifetime).
-            detached: process.platform !== 'win32',
-        });
-    } catch (error) {
-        if (directoryGrantSecret === grantSecretForChild) directoryGrantSecret = '';
-        throw error;
-    }
+    const child = spawn(pythonPath, [
+        '-m', 'uvicorn', 'server:app',
+        '--host', bindHost,
+        '--port', String(serverPort),
+        '--no-access-log',
+    ], {
+        cwd: slopsmithDir,
+        env: pythonEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // POSIX: give the child its own process group so stopPython() can kill
+        // the whole tree (uvicorn can spawn worker/reloader children). Without
+        // this, a plain kill leaves orphans holding the server port — the next
+        // launch then drifts to 18001+, changing the renderer origin and
+        // wiping origin-keyed localStorage (plugin settings reset every start).
+        // The handle is deliberately NOT unref()'d — the main process keeps
+        // tracking the child so shutdown() / stopPython() can terminate it
+        // (detached only controls the process group, not the child's lifetime).
+        detached: process.platform !== 'win32',
+    });
     pythonProcess = child;
 
     // Flip `serverReady` when uvicorn emits a startup signal on either
@@ -825,7 +771,6 @@ export async function startPython(): Promise<void> {
         }
         pythonProcess = null;
         serverReady = false;
-        if (directoryGrantSecret === grantSecretForChild) directoryGrantSecret = '';
     });
 
     child.on('error', (err: Error) => {
@@ -838,7 +783,6 @@ export async function startPython(): Promise<void> {
             startupError = `Failed to start Python process: ${err.message}`;
         }
         pythonProcess = null;
-        if (directoryGrantSecret === grantSecretForChild) directoryGrantSecret = '';
     });
 }
 
@@ -947,10 +891,6 @@ export function stopPython(immediate = false): void {
     // force-kill timer fires — SIGTERM/SIGKILL must hit the one being
     // stopped, never the replacement.
     const proc = pythonProcess;
-    // Stop minting grants immediately; a replacement backend gets a different
-    // secret, and the old in-memory grant table dies with its process.
-    directoryGrantBackendGeneration += 1;
-    directoryGrantSecret = '';
     if (!proc) {
         // No current backend — but a prior restart may have left one still
         // gracefully shutting down. On quit, force-kill it so it can't orphan

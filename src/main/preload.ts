@@ -8,14 +8,6 @@ import type { StartupStatus } from './python';
 // bundle never drags in config-reset's electron/python/fs dependencies.
 import type { ResetSelection, ResetSummary } from './config-reset';
 import type { ConfigPathCategories } from './config-paths';
-import type {
-    DirectoryGrantPickerOptions,
-    DirectoryGrantSelection,
-} from './directory-grant-contract';
-export type {
-    DirectoryGrantPickerOptions,
-    DirectoryGrantSelection,
-} from './directory-grant-contract';
 
 // Shape returned by maintenance.getPaths() — the enumerated per-OS categories
 // plus the resolved active CONFIG_DIR and a flag for the shared Docker dir.
@@ -42,7 +34,6 @@ import {
     IPC_POWER_SET_SCREEN_AWAKE,
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
-    IPC_DIALOG_PICK_DIRECTORY_GRANT,
     IPC_MAINTENANCE_GET_PATHS,
     IPC_MAINTENANCE_RESET,
     IPC_MAINTENANCE_RESTART,
@@ -549,10 +540,6 @@ const feedBackDesktopApi = {
     pickFile: (filters?: { name: string; extensions: string[] }[]) =>
         ipcRenderer.invoke('dialog:pickFile', filters),
     pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
-    pickDirectoryGrant: (
-        options: DirectoryGrantPickerOptions,
-    ): Promise<DirectoryGrantSelection | null> =>
-        ipcRenderer.invoke(IPC_DIALOG_PICK_DIRECTORY_GRANT, options),
     pickFiles: (filters?: { name: string; extensions: string[] }[]) =>
         ipcRenderer.invoke('dialog:pickFiles', filters),
 

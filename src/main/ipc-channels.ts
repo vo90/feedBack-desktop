@@ -48,11 +48,6 @@ export const IPC_POWER_SET_SCREEN_AWAKE = 'power:setScreenAwake' as const;
 export const IPC_WINDOW_GET_START_FULLSCREEN = 'window:getStartFullscreen' as const;
 export const IPC_WINDOW_SET_START_FULLSCREEN = 'window:setStartFullscreen' as const;
 
-// Native directory picker whose selected path is registered privately with
-// Core. The renderer receives an opaque plugin/purpose-bound grant plus a path
-// string for display, never a general filesystem API.
-export const IPC_DIALOG_PICK_DIRECTORY_GRANT = 'dialog:pickDirectoryGrant' as const;
-
 // Detachable panes (feedBack core's window.feedBack.panes).
 //
 // Deliberately tiny. The renderer OPENS its own pane windows with window.open() —
