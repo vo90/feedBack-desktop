@@ -105,7 +105,8 @@ crashReporter.start({
     uploadToServer: false,
     compress: false,
 });
-import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls, getConfigDir } from './python';
+import { startPython, stopPython, waitForPython, getPythonPort, StartupStatus, restartPython, getLanUrls, getConfigDir, registerDirectoryGrant } from './python';
+import { normalizeDirectoryGrantPickerOptions } from './directory-grant-contract';
 import { runConfigMigrations } from './config-migrations';
 import { registerMaintenanceHandlers } from './config-reset';
 import {
@@ -119,6 +120,7 @@ import {
     IPC_POWER_SET_SCREEN_AWAKE,
     IPC_WINDOW_GET_START_FULLSCREEN,
     IPC_WINDOW_SET_START_FULLSCREEN,
+    IPC_DIALOG_PICK_DIRECTORY_GRANT,
 } from './ipc-channels';
 import { initAudioBridge, shutdownAudio } from './audio-bridge';
 import { initDebugLogging, isDebugEnabled } from './debug-log';
@@ -1285,6 +1287,39 @@ async function startup(): Promise<void> {
             properties: ['openDirectory'],
         });
         return result.canceled ? null : result.filePaths[0];
+    });
+
+    ipcMain.handle(IPC_DIALOG_PICK_DIRECTORY_GRANT, async (event, rawOptions: unknown) => {
+        // Only the live, top-level fee[dB]ack renderer may open the capability
+        // picker. Popup windows and off-origin/error-page navigations fail
+        // closed even though they may have loaded the same preload script.
+        if (
+            !mainWindow
+            || mainWindow.isDestroyed()
+            || event.sender !== mainWindow.webContents
+            || event.senderFrame !== mainWindow.webContents.mainFrame
+            || !makeRendererOriginPredicate(port)(event.senderFrame.url)
+        ) {
+            throw new Error('Native directory selection is unavailable from this page.');
+        }
+        const options = normalizeDirectoryGrantPickerOptions(rawOptions);
+        const result = await dialog.showOpenDialog(mainWindow, {
+            properties: ['openDirectory'],
+            title: options.title,
+        });
+        if (result.canceled || !result.filePaths[0]) return null;
+
+        const selectedPath = result.filePaths[0];
+        const registration = await registerDirectoryGrant(
+            selectedPath,
+            options.owner,
+            options.purpose,
+        );
+        return {
+            grant: registration.grant,
+            displayPath: selectedPath,
+            expiresAt: registration.expiresAt,
+        };
     });
 
     ipcMain.handle('dialog:pickFiles', async (_event, filters?: { name: string; extensions: string[] }[]) => {
