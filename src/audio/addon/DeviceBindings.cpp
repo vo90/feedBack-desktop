@@ -7,6 +7,7 @@
 #include "NapiHelpers.h"
 #include "ChainOps.h"
 #include "HarmonicTargetBinding.h"
+#include "WhammyBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -629,7 +630,8 @@ Napi::Value GetSourceNoteVerdicts(const Napi::CallbackInfo& info)
     {
         const double songTime = info[1].As<Napi::Number>().DoubleValue();
         if (std::isfinite(songTime))
-            s->setPlayhead(songTime, info[2].As<Napi::Boolean>().Value());
+            s->setPlayhead(songTime, info[2].As<Napi::Boolean>().Value(),
+                info.Length()>3 && info[3].IsNumber() ? info[3].As<Napi::Number>().DoubleValue() : 1.0);
     }
 
     const auto verdicts = s->getNoteVerdicts();
@@ -789,6 +791,19 @@ Napi::Value setChartCore(Napi::Env env, Napi::Object reqObj, SourceChain* target
         }
         if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.hm)
             || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) return reject();
+        if (!readWhammy(noteObj, n.whammy, n.sus)) return reject();
+        // Chart owners must classify and remove visual-only targets before
+        // arming the verifier. Do not turn an excluded event into a miss.
+        if (n.whammy.present()) {
+            ChordScorer::Note barTarget;
+            barTarget.string=n.string;barTarget.fret=n.fret;barTarget.bend=n.b;barTarget.slide=n.sl;
+            barTarget.harmonic=n.hm;barTarget.harmonicSemitones=n.harmonicSemitones;
+            barTarget.harmonicTarget=n.harmonicTarget;barTarget.whammy=n.whammy;
+            ChordScorer::Request barContext;
+            barContext.arrangement=chart.arrangement;barContext.stringCount=chart.stringCount;
+            barContext.tuningOffsets=chart.tuningOffsets;barContext.capo=chart.capo;
+            if (!ChordScorer::barLimitation(barTarget,barContext).empty()) return reject();
+        }
         chart.notes.push_back(std::move(n));
     }
 
@@ -844,7 +859,8 @@ Napi::Value GetNoteVerdicts(const Napi::CallbackInfo& info)
     {
         const double songTime = info[0].As<Napi::Number>().DoubleValue();
         if (std::isfinite(songTime))
-            liveEngine->setPlayhead(songTime, info[1].As<Napi::Boolean>().Value());
+            liveEngine->setPlayhead(songTime, info[1].As<Napi::Boolean>().Value(),
+                info.Length()>2 && info[2].IsNumber() ? info[2].As<Napi::Number>().DoubleValue() : 1.0);
     }
 
     const auto verdicts = liveEngine->getNoteVerdicts();

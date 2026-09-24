@@ -59,6 +59,7 @@ public:
         bool ho = false, po = false, b = false, sl = false, hm = false;
         int harmonicSemitones = -1;
         HarmonicTarget harmonicTarget;
+        Whammy whammy;
     };
 
     // Chart context — the per-song scoring parameters. Mirrors the fields the
@@ -108,7 +109,7 @@ public:
     // avOffset/latency-corrected — the same clock the plugin correlates chart
     // note times against. Safe from the N-API thread; the timing trio is
     // published under `lock` so the worker reads a coherent snapshot.
-    void setPlayhead(double songTime, bool playing);
+    void setPlayhead(double songTime, bool playing, double playbackRate = 1.0);
 
     // Extra per-source playhead correction (seconds), subtracted from every pushed
     // playhead. The renderer's avOffset correction aligns the PRIMARY device; a
@@ -129,7 +130,7 @@ private:
     // The playhead the worker should score against right now: the last pushed
     // song time, advanced by wall-clock elapsed since the push while playing.
     // Freezes on a stale push (renderer tick stopped) or when paused.
-    double currentPlayhead() const;
+    double currentPlayhead(double* playbackRate = nullptr) const;
 
     // Per-note finalized state, parallel to `chart`. The harmonic-comb scores
     // every open-window note each tick; a note that is ever confirmed present
@@ -197,6 +198,7 @@ private:
     // (0 on the primary device). See setPlayheadOffset.
     std::atomic<double> playheadOffsetSec { 0.0 };
     double pushedSongTime = 0.0;
+    double pushedPlaybackRate = 1.0;
     double pushedReceiptMs = 0.0;  // getMillisecondCounterHiRes() at push
     bool   pushedPlaying = false;
     // One-way latch (false→true on first push, reset by setChart). Read

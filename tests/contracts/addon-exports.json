@@ -104,5 +104,6 @@
   "startBacking",
   "stopAudio",
   "stopBacking",
-  "unbindInputDevice"
+  "unbindInputDevice",
+  "whammyVersion"
 ]

@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include "HarmonicTarget.h"
+#include "Whammy.h"
 
 class ChordScorer
 {
@@ -62,6 +63,8 @@ public:
         bool harmonic = false;     // legacy hm without explicit pitch keeps its old behaviour
         int harmonicSemitones = -1; // hps: sounding semitones above tuned/capo open string
         HarmonicTarget harmonicTarget;
+        Whammy whammy;
+        double sustain = 0, elapsed = 0;
     };
 
     // Per-note scoring result. Same field names as the JS shape so the
@@ -81,6 +84,7 @@ public:
         float centsDiff = 0.0f;
         float centsError = 0.0f;
         double targetFret = -1; // selected sounding offset above the tuned/capo open string
+        std::string exclusionReason; // capability decision; never inferred from the input signal
     };
 
     struct Request
@@ -134,6 +138,8 @@ public:
         bool isHit = false;
         std::vector<NoteResult> results;
     };
+
+    static std::string barLimitation(const Note&, const Request&);
 
     ChordScorer() = default;
 

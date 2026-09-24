@@ -92,6 +92,12 @@ export interface HarmonicTarget {
     interval: number;
     policy: 'harmonic' | 'mixed' | 'attack_either';
 }
+export interface WhammyExpression {
+    version: 1;
+    policy: 'optional';
+    segments: Array<{start: number; end: number; source_id: string; group: string;
+        curve: Array<{t: number; v: number}>; vibrato?: 'slight' | 'wide'}>;
+}
 export interface ChordScoreNote {
     s: number;   // 0-based string index
     f: number;   // fret
@@ -103,6 +109,9 @@ export interface ChordScoreNote {
     hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
     hm?: boolean; // natural harmonic; hps supplies an explicit sounding target
     harmonic_target?: HarmonicTarget;
+    whammy?: WhammyExpression;
+    sus?: number;
+    elapsed?: number; // note-relative source song time, already speed-corrected
 }
 export interface ChordScoreRequest {
     // arrangement and stringCount are optional on the wire — the
@@ -134,6 +143,7 @@ export interface ChordScoreNoteResult {
     centsDiff: number | null;
     centsError: number | null;
     targetFret?: number;
+    exclusionReason?: string;
 }
 export interface ChordScoreResult {
     score: number;
@@ -157,6 +167,7 @@ export interface ChartNote {
     hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
     hm?: boolean;      // harmonic
     harmonic_target?: HarmonicTarget;
+    whammy?: WhammyExpression;
 }
 // The full song chart + scoring context, pushed once per arrangement load.
 export interface ChartUpdate {
@@ -332,6 +343,7 @@ const feedBackDesktopApi = {
         // on a downlevel addon that predates ChordScorer so the caller
         // can fall back gracefully.
         harmonicTargetVersion: (): Promise<number> => ipcRenderer.invoke('audio:harmonicTargetVersion'),
+        whammyVersion: (): Promise<number> => ipcRenderer.invoke('audio:whammyVersion'),
         scoreChord: (ctx: ChordScoreRequest): Promise<ChordScoreResult | null> =>
             ipcRenderer.invoke('audio:scoreChord', ctx),
 
@@ -350,8 +362,8 @@ const feedBackDesktopApi = {
         // renderer's unified, already-corrected playhead — the verifier scores
         // against this rather than the JUCE backing transport (frozen for
         // HTML5-routed sloppak songs). Pass them every detect tick.
-        getNoteVerdicts: (songTime?: number, playing?: boolean): Promise<NoteVerdict[] | null> =>
-            ipcRenderer.invoke('audio:getNoteVerdicts', songTime, playing),
+        getNoteVerdicts: (songTime?: number, playing?: boolean, playbackRate?: number): Promise<NoteVerdict[] | null> =>
+            ipcRenderer.invoke('audio:getNoteVerdicts', songTime, playing, playbackRate),
 
         // Raw polyphonic transcription — the ML note detector's full
         // active-pitch set. Resolves null when the ML detector isn't active
@@ -428,8 +440,8 @@ const feedBackDesktopApi = {
             ipcRenderer.invoke('audio:setSourceChart', id, chart),
         scoreSourceChord: (id: number, ctx: ChordScoreRequest): Promise<ChordScoreResult | null> =>
             ipcRenderer.invoke('audio:scoreSourceChord', id, ctx),
-        getSourceNoteVerdicts: (id: number, songTime?: number, playing?: boolean): Promise<NoteVerdict[] | null> =>
-            ipcRenderer.invoke('audio:getSourceNoteVerdicts', id, songTime, playing),
+        getSourceNoteVerdicts: (id: number, songTime?: number, playing?: boolean, playbackRate?: number): Promise<NoteVerdict[] | null> =>
+            ipcRenderer.invoke('audio:getSourceNoteVerdicts', id, songTime, playing, playbackRate),
         getSourceRawAudioFrame: (id: number, numSamples?: number): Promise<Float32Array> =>
             ipcRenderer.invoke('audio:getSourceRawAudioFrame', id, numSamples),
         getSourcePitchDetection: (id: number) =>

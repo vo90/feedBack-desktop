@@ -7,6 +7,7 @@
 #include "NapiHelpers.h"
 #include "ChainOps.h"
 #include "HarmonicTargetBinding.h"
+#include "WhammyBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -417,6 +418,14 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
         }
         if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.harmonic)
             || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) n.string = -1;
+        if (!noteObj.Get("whammy").IsUndefined()) {
+            if (!noteObj.Get("sus").IsNumber() || !noteObj.Get("elapsed").IsNumber()) n.string = -1;
+            else {
+                n.sustain = noteObj.Get("sus").As<Napi::Number>().DoubleValue();
+                n.elapsed = noteObj.Get("elapsed").As<Napi::Number>().DoubleValue();
+                if (!readWhammy(noteObj, n.whammy, n.sustain)) n.string = -1;
+            }
+        }
         req.notes.push_back(n);
     }
 
@@ -437,6 +446,7 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
         entry.Set("hit", r.hit);
         entry.Set("bandEnergy", r.bandEnergy);
         entry.Set("targetFret", r.targetFret);
+        if (!r.exclusionReason.empty()) entry.Set("exclusionReason", r.exclusionReason);
         // Mirror the JS result shape: when cents weren't measured the
         // fields are present-but-null so the renderer can distinguish
         // "no pitch check ran" (null) from "pitch check said 0"

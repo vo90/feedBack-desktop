@@ -33,6 +33,7 @@
     "getStreamOverflowCount",
     "getStreamSinkLevel",
     "getStreamUnderflowCount",
+    "harmonicTargetVersion",
     "isAudioRunning",
     "isAvailable",
     "isBackingPlaying",
@@ -98,7 +99,8 @@
     "startBacking",
     "stopAudio",
     "stopBacking",
-    "unbindInputDevice"
+    "unbindInputDevice",
+    "whammyVersion"
   ],
   "audioEffects": [
     "activateSegment",

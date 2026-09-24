@@ -10,6 +10,11 @@ target_compile_definitions(natural_harmonics_test PRIVATE JUCE_STANDALONE_APPLIC
 target_link_libraries(natural_harmonics_test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_dsp)
 enable_testing()
 add_test(NAME natural_harmonics COMMAND natural_harmonics_test)
+add_executable(whammy_test ../whammy/test.cpp ../../src/audio/ChordScorer.cpp ../../src/audio/NoteVerifier.cpp ../../src/audio/OnsetDetector.cpp)
+target_include_directories(whammy_test PRIVATE ../../src/audio)
+target_compile_definitions(whammy_test PRIVATE JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(whammy_test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_dsp)
+add_test(NAME whammy COMMAND whammy_test)
 
 # Optional compilation of the real IPC entry points using already-prepared
 # headers. No downloads, installations or writes to a dependency checkout.

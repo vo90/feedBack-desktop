@@ -38,6 +38,7 @@
   "audio:getStreamOverflowCount",
   "audio:getStreamSinkLevel",
   "audio:getStreamUnderflowCount",
+  "audio:harmonicTargetVersion",
   "audio:isAudioRunning",
   "audio:isAvailable",
   "audio:isBackingPlaying",
@@ -103,5 +104,6 @@
   "audio:stopAudio",
   "audio:stopBacking",
   "audio:unbindInputDevice",
+  "audio:whammyVersion",
   "debug:isEnabled"
 ]

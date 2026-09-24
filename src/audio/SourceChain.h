@@ -102,7 +102,7 @@ public:
     void setChart(const NoteVerifier::ChartUpdate& chart) { noteVerifier.setChart(chart); }
     void clearChart() { noteVerifier.clearChart(); }
     std::vector<NoteVerifier::Verdict> getNoteVerdicts() { return noteVerifier.drainVerdicts(); }
-    void setPlayhead(double songTime, bool playing) { noteVerifier.setPlayhead(songTime, playing); }
+    void setPlayhead(double songTime, bool playing, double rate = 1.0) { noteVerifier.setPlayhead(songTime, playing, rate); }
     // Per-source capture-latency correction (seconds), applied to the verifier
     // playhead. Two INDEPENDENT components that SUM: the AUTO part is the engine's
     // measured (extra-primary) device input-latency delta; the USER part is the
