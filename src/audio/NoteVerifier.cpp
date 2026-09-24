@@ -279,6 +279,7 @@ void NoteVerifier::run()
                 n.bend = cn.b;
                 n.slide = cn.sl;
                 n.harmonic = cn.hm;
+                n.harmonicSemitones = cn.harmonicSemitones;
                 batch.push_back({ i, n });
             }
         }

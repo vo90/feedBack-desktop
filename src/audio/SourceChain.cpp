@@ -500,7 +500,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             // Sum in 64-bit: base/off/capo/fret arrive from IPC as 32-bit ints,
             // so an int sum could overflow before the range check.
             const long long expectedMidi =
-                (long long) (*base)[(size_t) n.string] + off + req.capo + n.fret;
+                (long long) (*base)[(size_t) n.string] + off + req.capo + (n.harmonic && n.harmonicSemitones > 0 ? n.harmonicSemitones : n.fret);
             if (expectedMidi < 0 || expectedMidi > 127)
             {
                 allValid = false;
@@ -540,7 +540,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             const int off = (n.string < (int) req.tuningOffsets.size())
                                 ? req.tuningOffsets[(size_t) n.string] : 0;
             const int expectedMidi = (int) (
-                (long long) (*base)[(size_t) n.string] + off + req.capo + n.fret);
+                (long long) (*base)[(size_t) n.string] + off + req.capo + (n.harmonic && n.harmonicSemitones > 0 ? n.harmonicSemitones : n.fret));
 
             float conf = 0.0f;
             bool active = mlNoteDetector.isPitchActive(expectedMidi, &conf);
@@ -555,7 +555,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             }
             // Harmonic: the fretted fundamental is suppressed and an overtone
             // sounds — accept the octave or octave+fifth above.
-            if (! active && n.harmonic)
+            if (! active && n.harmonic && n.harmonicSemitones < 0)
                 active = mlNoteDetector.isPitchActive(expectedMidi + 12, &conf)
                       || mlNoteDetector.isPitchActive(expectedMidi + 19, &conf);
 

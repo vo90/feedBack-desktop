@@ -406,6 +406,14 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
         n.bend = truthy("b");
         n.slide = truthy("sl");
         n.harmonic = truthy("hm");
+        if (noteObj.Has("hps") && !noteObj.Get("hps").IsUndefined())
+        {
+            const auto v = noteObj.Get("hps");
+            const double hps = v.IsNumber() ? v.As<Napi::Number>().DoubleValue() : -1.0;
+            if (!n.harmonic || !std::isfinite(hps) || hps < 1 || hps > 48 || std::floor(hps) != hps)
+            { n.string = -1; req.notes.push_back(n); continue; }
+            n.harmonicSemitones = (int) hps;
+        }
         req.notes.push_back(n);
     }
 

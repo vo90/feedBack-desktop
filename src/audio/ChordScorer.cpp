@@ -214,7 +214,9 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
     }
     for (const auto& n : req.notes)
     {
-        if (n.string < 0 || n.string >= req.stringCount)
+        if (n.string < 0 || n.string >= req.stringCount
+            || n.harmonicSemitones < -1 || n.harmonicSemitones == 0 || n.harmonicSemitones > 48
+            || (n.harmonicSemitones > 0 && !n.harmonic))
         {
             fillMissResults();
             return out;
@@ -257,22 +259,26 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             energyThreshold = kEnergyThresholdSoftAttack;
         if (note.bend || note.slide)
             cents = std::max(cents, kBendSlideCentsFloor);
-        if (note.harmonic)
-            cents = 0.0f; // energy-only
+        const bool preciseHarmonic = note.harmonic && note.harmonicSemitones > 0;
+        if (preciseHarmonic)
+            cents = req.pitchCheckCents > 0 ? req.pitchCheckCents : 50.0f;
+        else if (note.harmonic)
+            cents = 0.0f; // legacy energy-only
 
         NoteResult nr{};
         nr.string = note.string;
         nr.fret = note.fret;
 
-        if (req.harmonicVerify)
+        if (req.harmonicVerify || preciseHarmonic)
         {
             // ── Harmonic-comb verification ──────────────────────────────
             // Score the note by the energy at its expected harmonics
             // (f, 2f .. 5f) relative to the off-harmonic spectral floor
             // sampled between them. No whole-spectrum division, so a bright
             // or broadband signal does not dilute the measurement.
-            const int expectedMidi =
-                midiFromStringFret(note.string, note.fret, base, req.tuningOffsets, req.capo);
+            const double expectedMidi =
+                midiFromStringFret(note.string, preciseHarmonic ? 0 : note.fret, base, req.tuningOffsets, req.capo)
+                + (preciseHarmonic ? naturalPitchSemitones(note.harmonicSemitones) : 0.0);
             const double f0 = 440.0 * std::pow(2.0, (expectedMidi - 69) / 12.0);
 
             // Refined peak frequency + magnitude in a ±~half-semitone window
@@ -384,7 +390,7 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             // the 0.20 default; bass passes a lower value because its DI
             // fundamental is legitimately weak, and `<= 0` disables the gate.
             const bool fundamentalPresent =
-                note.harmonic
+                (note.harmonic && !preciseHarmonic)
              || req.fundamentalRatio <= 0.0f
              || maxHarmMag <= 0.0f
              || fundMag >= req.fundamentalRatio * maxHarmMag;
@@ -395,8 +401,17 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             nr.hasCents = true;
             nr.centsDiff = std::abs(centsError);
             nr.centsError = centsError;
+            // A lower note's strong second/third partial can otherwise feed
+            // this comb. For a lone precise target, reject a stronger lower
+            // fundamental. Chords may legitimately contain that lower note.
+            float lower2 = 0.0f, lower3 = 0.0f;
+            if (preciseHarmonic && req.notes.size() == 1) {
+                peakNear(f0 / 2, lower2);
+                peakNear(f0 / 3, lower3);
+            }
             nr.hit = (snr >= req.harmonicSnr)
                   && fundamentalPresent
+                  && std::max(lower2, lower3) <= fundMag
                   && (cents <= 0.0f || std::abs(centsError) <= cents);
         }
         else
@@ -467,4 +482,19 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
     out.score = out.totalStrings > 0 ? (float) hits / (float) out.totalStrings : 0.0f;
     out.isHit = out.score >= req.minHitRatio;
     return out;
+}
+double ChordScorer::naturalPitchSemitones(int semitones)
+{
+    int partial = 0;
+    switch (semitones) {
+        case 12: partial=2; break;
+        case 19: partial=3; break;
+        case 24: partial=4; break;
+        case 28: partial=5; break;
+        case 31: partial=6; break;
+        case 34: partial=7; break;
+        case 36: partial=8; break;
+        default: return semitones; // no inferred partial for unknown metadata
+    }
+    return 12.0 * std::log2((double) partial);
 }

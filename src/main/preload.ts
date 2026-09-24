@@ -94,7 +94,8 @@ export interface ChordScoreNote {
     po?: boolean; // pull-off
     b?: boolean;  // bend
     sl?: boolean; // slide
-    hm?: boolean; // harmonic (energy-only check)
+    hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
+    hm?: boolean; // natural harmonic; hps supplies an explicit sounding target
 }
 export interface ChordScoreRequest {
     // arrangement and stringCount are optional on the wire — the
@@ -145,6 +146,7 @@ export interface ChartNote {
     po?: boolean;      // pull-off
     b?: boolean;       // bend
     sl?: boolean;      // slide
+    hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
     hm?: boolean;      // harmonic
 }
 // The full song chart + scoring context, pushed once per arrangement load.

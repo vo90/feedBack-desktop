@@ -56,6 +56,7 @@ public:
         int fret = 0;
         double sus = 0.0;   // sustain length (seconds)
         bool ho = false, po = false, b = false, sl = false, hm = false;
+        int harmonicSemitones = -1;
     };
 
     // Chart context — the per-song scoring parameters. Mirrors the fields the

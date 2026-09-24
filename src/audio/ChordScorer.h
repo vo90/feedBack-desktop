@@ -31,6 +31,12 @@ public:
     // the request rather than guess a fallback tuning.
     static const std::vector<int>* standardMidiFor(const std::string& arrangement, int stringCount);
 
+    // The source's integer MIDI offset describes an overtone using equal-
+    // tempered notation. Grade the actual natural partial, preserving that
+    // stored source value. In particular the seventh partial is 31 cents flat
+    // of its nearest equal-tempered note; widening every pitch gate is wrong.
+    static double naturalPitchSemitones(int sourceSemitones);
+
     // Hard upper bound on the FFT size we will ever build. The 3 Hz
     // bin-width floor in scoreChord() implies fftSize ≈ nextPow2(SR/3),
     // which is 16384 at 48 kHz, 32768 at 96 kHz, 65536 at 192 kHz —
@@ -52,7 +58,8 @@ public:
         bool pullOff = false;      // po — same
         bool bend = false;         // b  — pitch moving, widen pitch window
         bool slide = false;        // sl — same
-        bool harmonic = false;     // hm — energy-only check, skip pitch
+        bool harmonic = false;     // legacy hm without explicit pitch keeps its old behaviour
+        int harmonicSemitones = -1; // hps: sounding semitones above tuned/capo open string
     };
 
     // Per-note scoring result. Same field names as the JS shape so the

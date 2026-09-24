@@ -777,6 +777,14 @@ Napi::Value setChartCore(Napi::Env env, Napi::Object reqObj, SourceChain* target
         n.b  = truthy("b");
         n.sl = truthy("sl");
         n.hm = truthy("hm");
+        if (noteObj.Has("hps") && !noteObj.Get("hps").IsUndefined())
+        {
+            const auto v = noteObj.Get("hps");
+            const double hps = v.IsNumber() ? v.As<Napi::Number>().DoubleValue() : -1.0;
+            if (!n.hm || !std::isfinite(hps) || hps < 1 || hps > 48 || std::floor(hps) != hps)
+            { return reject(); }
+            n.harmonicSemitones = (int) hps;
+        }
         chart.notes.push_back(std::move(n));
     }
 
