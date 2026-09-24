@@ -86,6 +86,12 @@ export interface DeviceConfigResult {
 // bindings. Optional `mt` field on Note isn't read by the scorer
 // (matches JS) but is allowed in the request shape so callers can
 // pass through the same chart-note objects they consume in JS.
+export interface HarmonicTarget {
+    kind: 'pinch' | 'artificial' | 'tapped' | 'semi' | 'feedback';
+    node: number;
+    interval: number;
+    policy: 'harmonic' | 'mixed' | 'attack_either';
+}
 export interface ChordScoreNote {
     s: number;   // 0-based string index
     f: number;   // fret
@@ -96,6 +102,7 @@ export interface ChordScoreNote {
     sl?: boolean; // slide
     hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
     hm?: boolean; // natural harmonic; hps supplies an explicit sounding target
+    harmonic_target?: HarmonicTarget;
 }
 export interface ChordScoreRequest {
     // arrangement and stringCount are optional on the wire — the
@@ -126,6 +133,7 @@ export interface ChordScoreNoteResult {
     bandEnergy: number;
     centsDiff: number | null;
     centsError: number | null;
+    targetFret?: number;
 }
 export interface ChordScoreResult {
     score: number;
@@ -148,6 +156,7 @@ export interface ChartNote {
     sl?: boolean;      // slide
     hps?: number; // explicit natural harmonic pitch above the tuned/capo open string
     hm?: boolean;      // harmonic
+    harmonic_target?: HarmonicTarget;
 }
 // The full song chart + scoring context, pushed once per arrangement load.
 export interface ChartUpdate {
@@ -169,6 +178,7 @@ export interface NoteVerdict {
     detectedSongTime: number;
     centsError: number;
     snr: number;
+    targetFret?: number;
 }
 
 // Raw polyphonic transcription from the ML note detector (Basic Pitch).
@@ -321,6 +331,7 @@ const feedBackDesktopApi = {
         // cross IPC; only the small result object does. Returns `null`
         // on a downlevel addon that predates ChordScorer so the caller
         // can fall back gracefully.
+        harmonicTargetVersion: (): Promise<number> => ipcRenderer.invoke('audio:harmonicTargetVersion'),
         scoreChord: (ctx: ChordScoreRequest): Promise<ChordScoreResult | null> =>
             ipcRenderer.invoke('audio:scoreChord', ctx),
 

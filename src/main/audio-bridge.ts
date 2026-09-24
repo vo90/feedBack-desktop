@@ -791,6 +791,10 @@ export function initAudioBridge(): void {
     // require a mutex around ChordScorer's reusable FFT/scratch state.
     // The trade-off doesn't pay back for this workload — revisit only
     // if profiling shows actual main-loop stalls.
+    ipcMain.handle('audio:harmonicTargetVersion', () => {
+        return audio && typeof audio.harmonicTargetVersion === 'function'
+            && audio.harmonicTargetVersion() === 1 ? 1 : 0;
+    });
     ipcMain.handle('audio:scoreChord', (_event, ctx: unknown) => {
         // Feature-detect the native method the same way getSampleRate
         // above does — a downlevel addon (pre-ChordScorer build) should

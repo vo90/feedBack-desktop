@@ -404,7 +404,11 @@ ChordScorer::Result SourceChain::scoreChord(const ChordScorer::Request& req)
     // detector's active-pitch set — genuine polyphonic transcription rather than
     // the per-string energy/constraint check. `req.bypassMl` overrides this so the
     // renderer can force the DSP band-energy scorer.
-    if (! req.bypassMl && mlNoteDetector.isReady())
+    const bool explicitFretted = std::any_of(req.notes.begin(), req.notes.end(),
+        [](const auto& n) { return n.harmonicTarget.present(); });
+    // Generic active-pitch membership cannot test the semi mixture or the
+    // selected partial. Keep those policies on the matching spectral scorer.
+    if (! req.bypassMl && !explicitFretted && mlNoteDetector.isReady())
         return scoreChordWithMl(req);
 
     // Snapshot the input ring at the requested window size and forward to the

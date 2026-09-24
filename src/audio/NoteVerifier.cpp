@@ -260,7 +260,7 @@ void NoteVerifier::run()
         {
             if (i >= state.size() || state[i].finalized) continue;
             const auto& cn = chart.notes[i];
-            const double grace = susGraceFor(cn.sus);
+            const double grace = cn.harmonicTarget.feedback() ? 0 : susGraceFor(cn.sus);
 
             if (playhead > cn.t + tol + grace)
                 passedIdx.push_back(i);
@@ -280,6 +280,7 @@ void NoteVerifier::run()
                 n.slide = cn.sl;
                 n.harmonic = cn.hm;
                 n.harmonicSemitones = cn.harmonicSemitones;
+                n.harmonicTarget = cn.harmonicTarget;
                 batch.push_back({ i, n });
             }
         }
@@ -293,7 +294,7 @@ void NoteVerifier::run()
     // The comb only answers "is this note's pitch present?" — timing comes
     // from the onset log. Score every open-window note against the latest
     // input frame.
-    struct ScoredNote { size_t index; bool present; float centsError; float snr; };
+    struct ScoredNote { size_t index; bool present; float centsError; float snr; double targetFret; };
     std::vector<ScoredNote> scored;
 
     if (! batch.empty())
@@ -323,6 +324,7 @@ void NoteVerifier::run()
             s.index = batch[i].index;
             s.present = result.results[i].hit;
             s.centsError = result.results[i].centsError;
+            s.targetFret = result.results[i].targetFret;
             s.snr = result.results[i].bandEnergy;  // harmonicVerify puts SNR here
             scored.push_back(s);
         }
@@ -344,7 +346,7 @@ void NoteVerifier::run()
             if (! s.present) continue;
             ++st.presentFrames;
             st.everPresent = true;
-            if (s.snr > st.bestSnr) { st.bestSnr = s.snr; st.bestCents = s.centsError; }
+            if (s.snr > st.bestSnr) { st.bestSnr = s.snr; st.bestCents = s.centsError; st.bestTargetFret = s.targetFret; }
         }
 
         const double tol = ctx.timingTolerance;
@@ -361,7 +363,7 @@ void NoteVerifier::run()
             // fraction of the note's scored frames — rejecting wrong-position
             // notes that only flicker present on a few stray frames while keeping
             // correctly-fretted notes, which ring through most of their window.
-            const bool hit = (ctx.presenceRatio <= 0.0f)
+            const bool hit = (ctx.presenceRatio <= 0.0f || cn.harmonicTarget.feedback())
                 ? st.everPresent
                 : (st.presentFrames > 0
                    && (double) st.presentFrames
@@ -401,6 +403,7 @@ void NoteVerifier::run()
                 v.detected = true;
                 v.detectedSongTime = when;
                 v.centsError = st.bestCents;
+                v.targetFret = st.bestTargetFret;
                 v.snr = st.bestSnr;
                 pending.push_back(v);
             }

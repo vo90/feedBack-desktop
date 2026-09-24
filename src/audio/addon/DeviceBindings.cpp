@@ -6,6 +6,7 @@
 #include "AddonContext.h"
 #include "NapiHelpers.h"
 #include "ChainOps.h"
+#include "HarmonicTargetBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -641,6 +642,7 @@ Napi::Value GetSourceNoteVerdicts(const Napi::CallbackInfo& info)
         entry.Set("detected", v.detected);
         entry.Set("detectedSongTime", v.detectedSongTime);
         entry.Set("centsError", v.centsError);
+        entry.Set("targetFret", v.targetFret);
         entry.Set("snr", v.snr);
         arr.Set((uint32_t) i, entry);
     }
@@ -785,6 +787,8 @@ Napi::Value setChartCore(Napi::Env env, Napi::Object reqObj, SourceChain* target
             { return reject(); }
             n.harmonicSemitones = (int) hps;
         }
+        if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.hm)
+            || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) return reject();
         chart.notes.push_back(std::move(n));
     }
 
@@ -853,6 +857,7 @@ Napi::Value GetNoteVerdicts(const Napi::CallbackInfo& info)
         entry.Set("detected", v.detected);
         entry.Set("detectedSongTime", v.detectedSongTime);
         entry.Set("centsError", v.centsError);
+        entry.Set("targetFret", v.targetFret);
         entry.Set("snr", v.snr);
         arr.Set((uint32_t) i, entry);
     }

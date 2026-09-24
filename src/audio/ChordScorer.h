@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "HarmonicTarget.h"
 
 class ChordScorer
 {
@@ -60,6 +61,7 @@ public:
         bool slide = false;        // sl — same
         bool harmonic = false;     // legacy hm without explicit pitch keeps its old behaviour
         int harmonicSemitones = -1; // hps: sounding semitones above tuned/capo open string
+        HarmonicTarget harmonicTarget;
     };
 
     // Per-note scoring result. Same field names as the JS shape so the
@@ -78,6 +80,7 @@ public:
         bool hasCents = false;
         float centsDiff = 0.0f;
         float centsError = 0.0f;
+        double targetFret = -1; // selected sounding offset above the tuned/capo open string
     };
 
     struct Request

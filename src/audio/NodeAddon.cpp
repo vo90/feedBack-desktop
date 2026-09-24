@@ -366,6 +366,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("getBackingLevel", Napi::Function::New(env, GetBackingLevel));
 
     // Pitch detection
+    exports.Set("harmonicTargetVersion", Napi::Function::New(env,
+        [](const Napi::CallbackInfo& info) -> Napi::Value { return Napi::Number::New(info.Env(), 1); }));
     exports.Set("getPitchDetection", Napi::Function::New(env, GetPitchDetection));
     exports.Set("getRawPitchDetection", Napi::Function::New(env, GetRawPitchDetection));
     exports.Set("getRawAudioFrame", Napi::Function::New(env, GetRawAudioFrame));

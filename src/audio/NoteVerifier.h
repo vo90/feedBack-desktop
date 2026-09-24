@@ -38,6 +38,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "HarmonicTarget.h"
 
 class InputRingReader;  // resolved in NoteVerifier.cpp — avoids a circular include
 
@@ -57,6 +58,7 @@ public:
         double sus = 0.0;   // sustain length (seconds)
         bool ho = false, po = false, b = false, sl = false, hm = false;
         int harmonicSemitones = -1;
+        HarmonicTarget harmonicTarget;
     };
 
     // Chart context — the per-song scoring parameters. Mirrors the fields the
@@ -90,6 +92,7 @@ public:
         double detectedSongTime = 0.0; // playhead at which the note was scored
         float centsError = 0.0f;
         float snr = 0.0f;
+        double targetFret = -1;
     };
 
     // Replace the chart + context, resetting all finalized state. Thread-safe.
@@ -144,6 +147,7 @@ private:
         int scoredFrames = 0;      // frames in-window the note was scored against
         float bestSnr = 0.0f;      // strongest SNR among present ticks
         float bestCents = 0.0f;    // cents error at the strongest present tick
+        double bestTargetFret = -1;
     };
 
     // The capture chain whose input ring this verifier scores against (the owning

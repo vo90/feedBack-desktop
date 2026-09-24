@@ -216,7 +216,9 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
     {
         if (n.string < 0 || n.string >= req.stringCount
             || n.harmonicSemitones < -1 || n.harmonicSemitones == 0 || n.harmonicSemitones > 48
-            || (n.harmonicSemitones > 0 && !n.harmonic))
+            || (n.harmonicSemitones > 0 && !n.harmonic)
+            || !n.harmonicTarget.valid()
+            || (n.harmonicTarget.present() && (n.harmonic || n.harmonicSemitones != -1 || n.fret < 0 || n.fret > 48)))
         {
             fillMissResults();
             return out;
@@ -260,7 +262,8 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
         if (note.bend || note.slide)
             cents = std::max(cents, kBendSlideCentsFloor);
         const bool preciseHarmonic = note.harmonic && note.harmonicSemitones > 0;
-        if (preciseHarmonic)
+        const bool frettedHarmonic = note.harmonicTarget.present();
+        if (preciseHarmonic || frettedHarmonic)
             cents = req.pitchCheckCents > 0 ? req.pitchCheckCents : 50.0f;
         else if (note.harmonic)
             cents = 0.0f; // legacy energy-only
@@ -269,8 +272,13 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
         nr.string = note.string;
         nr.fret = note.fret;
 
-        if (req.harmonicVerify || preciseHarmonic)
+        if (frettedHarmonic && (note.bend || note.slide)) cents = std::max(cents, kBendSlideCentsFloor);
+        if (req.harmonicVerify || preciseHarmonic || frettedHarmonic)
         {
+            // Two allowed interpretations of a feedback attack still produce
+            // exactly one result. Reuse this spectrum; never create a second note.
+            auto checkComb = [&](bool ordinary) -> NoteResult {
+            NoteResult nr{}; nr.string = note.string; nr.fret = note.fret;
             // ── Harmonic-comb verification ──────────────────────────────
             // Score the note by the energy at its expected harmonics
             // (f, 2f .. 5f) relative to the off-harmonic spectral floor
@@ -278,8 +286,10 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             // or broadband signal does not dilute the measurement.
             const double expectedMidi =
                 midiFromStringFret(note.string, preciseHarmonic ? 0 : note.fret, base, req.tuningOffsets, req.capo)
-                + (preciseHarmonic ? naturalPitchSemitones(note.harmonicSemitones) : 0.0);
+                + (preciseHarmonic ? naturalPitchSemitones(note.harmonicSemitones)
+                   : frettedHarmonic && !ordinary ? naturalPitchSemitones(note.harmonicTarget.interval) : 0.0);
             const double f0 = 440.0 * std::pow(2.0, (expectedMidi - 69) / 12.0);
+            nr.targetFret = expectedMidi - midiFromStringFret(note.string, 0, base, req.tuningOffsets, req.capo);
 
             // Refined peak frequency + magnitude in a ±~half-semitone window
             // around `targetHz`. The window doubles as the pitch tolerance:
@@ -409,10 +419,34 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
                 peakNear(f0 / 2, lower2);
                 peakNear(f0 / 3, lower3);
             }
+            bool selectedPartial = true;
+            if (frettedHarmonic && !ordinary) {
+                const double baseMidi = midiFromStringFret(note.string, note.fret, base, req.tuningOffsets, req.capo);
+                const double baseHz = 440.0 * std::pow(2.0, (baseMidi - 69) / 12.0);
+                float baseMag = 0;
+                peakNear(baseHz, baseMag);
+                // Semi allows a substantial fretted component; strict forms
+                // require the selected partial to dominate it. This is spectral
+                // evidence, not a claim to identify the player's hand gesture.
+                selectedPartial = fundMag >= baseMag * (note.harmonicTarget.mixed() ? 0.65f : 1.05f);
+                // A bright ordinary string has many competing upper partials.
+                // The selected one must stand out among the other low partials.
+                for (int h = 2; h <= 8; ++h) {
+                    const double ratio = h / std::pow(2.0, naturalPitchSemitones(note.harmonicTarget.interval) / 12.0);
+                    if (std::abs(ratio - std::round(ratio)) < .001) continue;
+                    float other = 0; peakNear(baseHz * h, other);
+                    if (other > fundMag * 1.05f) selectedPartial = false;
+                }
+            }
             nr.hit = (snr >= req.harmonicSnr)
                   && fundamentalPresent
+                  && selectedPartial
                   && std::max(lower2, lower3) <= fundMag
                   && (cents <= 0.0f || std::abs(centsError) <= cents);
+            return nr;
+            };
+            nr = checkComb(false);
+            if (!nr.hit && note.harmonicTarget.feedback()) nr = checkComb(true);
         }
         else
         {

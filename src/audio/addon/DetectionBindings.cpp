@@ -6,6 +6,7 @@
 #include "AddonContext.h"
 #include "NapiHelpers.h"
 #include "ChainOps.h"
+#include "HarmonicTargetBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -414,6 +415,8 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
             { n.string = -1; req.notes.push_back(n); continue; }
             n.harmonicSemitones = (int) hps;
         }
+        if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.harmonic)
+            || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) n.string = -1;
         req.notes.push_back(n);
     }
 
@@ -433,6 +436,7 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
         entry.Set("f", r.fret);
         entry.Set("hit", r.hit);
         entry.Set("bandEnergy", r.bandEnergy);
+        entry.Set("targetFret", r.targetFret);
         // Mirror the JS result shape: when cents weren't measured the
         // fields are present-but-null so the renderer can distinguish
         // "no pitch check ran" (null) from "pitch check said 0"
