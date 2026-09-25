@@ -103,6 +103,8 @@
   "audio:startBacking",
   "audio:stopAudio",
   "audio:stopBacking",
+  "audio:subscribeBackingSnapshots",
   "audio:unbindInputDevice",
+  "audio:unsubscribeBackingSnapshots",
   "debug:isEnabled"
 ]

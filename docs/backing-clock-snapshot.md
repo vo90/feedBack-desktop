@@ -10,7 +10,20 @@ Position retains BackingPlayer's existing seconds/latency convention. The addon
 computes sample age using the same native monotonic clock used at publication.
 The renderer must not subtract this clock from `performance.now()`; bracket the
 IPC request and map age onto that bracket, accounting for round-trip uncertainty.
-Neither reading the snapshot nor forwarding it through IPC refreshes its age.
+The main process adds `clockId` (its monotonic time origin), `readAtMs` (the native
+read's midpoint in that clock) and `readUncertaintyMs` (half the read duration).
+Core calibrates the offset to its own monotonic clock from request bounds. This
+lets a delayed response retain its actual observation time. Neither reading the
+snapshot nor forwarding it through IPC refreshes its native age.
+
+`audio.subscribeBackingSnapshots(callback)` starts a 50 ms main-thread publisher
+and returns an idempotent unsubscribe function. It supports one transport owner
+per renderer. Increasing subscription tokens protect replacement subscriptions
+from late stop messages; the preload filters queued packets by token. Pausing,
+seeking or changing songs unsubscribes. Main-frame navigation, renderer loss and
+WebContents destruction release timers and listeners. The publisher never runs
+on the real-time audio thread. Polled observations remain available for clock
+calibration and compatibility with Core builds without subscriptions.
 
 All publishers already hold BackingPlayer's lock: controls acquire it, while audio
 callbacks publish only after their existing try-lock succeeds. Atomic payload

@@ -99,6 +99,7 @@
     "startBacking",
     "stopAudio",
     "stopBacking",
+    "subscribeBackingSnapshots",
     "unbindInputDevice"
   ],
   "audioEffects": [
