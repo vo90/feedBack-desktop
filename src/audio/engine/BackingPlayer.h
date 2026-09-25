@@ -15,6 +15,7 @@
 // renderBuffer() is never read while prepare() can resize it.
 
 #include "EngineState.h"
+#include "BackingClockSnapshot.h"
 #include "../BackingLeveler.h"
 #include "signalsmith-stretch.h" // resolved via SS_STRETCH_DIR include path
 
@@ -51,6 +52,7 @@ public:
     bool isPlaying() const { return playing.load(); }
     double getPosition() const { return cachedPosition.load(); }
     double getDuration() const { return cachedDuration.load(); }
+    BackingClockSample getClockSnapshot() const { return clockSnapshot.read(); }
 
     // Re-prepare the transport + stretcher + buffers at a (new) device format.
     // Call from the about-to-start hook that owns backing playback (duplex:
@@ -76,6 +78,10 @@ public:
 
 private:
     void stopNoLock();
+    void publishClockLocked();
+    BackingClockSnapshot clockSnapshot;
+    std::uint64_t clockGeneration = 0; // protected by lock, including RT writes
+    bool ended = false;                // protected by lock
 
     EngineState& state;
 

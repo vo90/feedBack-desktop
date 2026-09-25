@@ -64,6 +64,24 @@ Napi::Value GetBackingDuration(const Napi::CallbackInfo& info)
     return Napi::Number::New(info.Env(), dur);
 }
 
+Napi::Value GetBackingSnapshot(const Napi::CallbackInfo& info)
+{
+    const auto env = info.Env();
+    const auto liveEngine = snapshotEngine();
+    const auto s = liveEngine ? liveEngine->getBackingSnapshot() : BackingClockSample{};
+    auto result = Napi::Object::New(env);
+    result.Set("version", 1);
+    result.Set("valid", s.valid);
+    result.Set("position", s.position);
+    result.Set("ageMs", juce::jmax(0.0, juce::Time::getMillisecondCounterHiRes() - s.sampledAtMs));
+    result.Set("sequence", static_cast<double>(s.sequence));
+    result.Set("generation", static_cast<double>(s.generation));
+    result.Set("rate", s.rate);
+    result.Set("playing", s.playing);
+    result.Set("ended", s.ended);
+    return result;
+}
+
 Napi::Value IsBackingPlaying(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();

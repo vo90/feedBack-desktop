@@ -468,6 +468,10 @@ const feedBackDesktopApi = {
         stopBacking: () => ipcRenderer.invoke('audio:stopBacking'),
         seekBacking: (seconds: number) => ipcRenderer.invoke('audio:seekBacking', seconds),
         getBackingPosition: (): Promise<number> => ipcRenderer.invoke('audio:getBackingPosition'),
+        getBackingSnapshot: (): Promise<{
+            version: 1; valid: boolean; position: number; ageMs: number;
+            sequence: number; generation: number; rate: number; playing: boolean; ended: boolean;
+        } | null> => ipcRenderer.invoke('audio:getBackingSnapshot'),
         getBackingDuration: (): Promise<number> => ipcRenderer.invoke('audio:getBackingDuration'),
         isBackingPlaying: (): Promise<boolean> => ipcRenderer.invoke('audio:isBackingPlaying'),
         setBackingSpeed: (speed: number): Promise<boolean> => ipcRenderer.invoke('audio:setBackingSpeed', speed),

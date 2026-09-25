@@ -27,6 +27,7 @@ Napi::Value EnableFileLogging(const Napi::CallbackInfo& info);
 Napi::Value GetBackingDuration(const Napi::CallbackInfo& info);
 Napi::Value GetBackingLevel(const Napi::CallbackInfo& info);
 Napi::Value GetBackingPosition(const Napi::CallbackInfo& info);
+Napi::Value GetBackingSnapshot(const Napi::CallbackInfo& info);
 Napi::Value GetBufferSizes(const Napi::CallbackInfo& info);
 Napi::Value GetChainGeneration(const Napi::CallbackInfo& info);
 Napi::Value GetChainState(const Napi::CallbackInfo& info);

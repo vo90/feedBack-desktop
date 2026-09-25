@@ -15,6 +15,7 @@
   "audio:getBackingDuration",
   "audio:getBackingLevel",
   "audio:getBackingPosition",
+  "audio:getBackingSnapshot",
   "audio:getBufferSizes",
   "audio:getChainState",
   "audio:getCurrentDevice",
