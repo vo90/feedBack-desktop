@@ -220,6 +220,9 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
         if (n.string < 0 || n.string >= req.stringCount
             || n.harmonicSemitones < -1 || n.harmonicSemitones == 0 || n.harmonicSemitones > 48
             || (n.harmonicSemitones > 0 && !n.harmonic)
+            || !n.harmonicContact.valid(n.sustain,n.fret)
+            || (n.harmonicContact.present() && (n.harmonic || n.harmonicSemitones != -1
+                || n.harmonicTarget.present() || n.elapsed >= n.harmonicContact.start))
             || !n.harmonicTarget.valid() || !n.whammy.valid(n.sustain) || !std::isfinite(n.elapsed)
             || (n.harmonicTarget.present() && (n.harmonic || n.harmonicSemitones != -1 || n.fret < 0 || n.fret > 48)))
         {

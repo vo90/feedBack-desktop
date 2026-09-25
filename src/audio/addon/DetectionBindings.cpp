@@ -8,6 +8,7 @@
 #include "ChainOps.h"
 #include "HarmonicTargetBinding.h"
 #include "WhammyBinding.h"
+#include "HarmonicContactBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -418,12 +419,13 @@ Napi::Value scoreChordCore(Napi::Env env, Napi::Object reqObj, SourceChain* targ
         }
         if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.harmonic)
             || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) n.string = -1;
-        if (!noteObj.Get("whammy").IsUndefined()) {
+        if (!noteObj.Get("whammy").IsUndefined() || !noteObj.Get("harmonic_changes").IsUndefined()) {
             if (!noteObj.Get("sus").IsNumber() || !noteObj.Get("elapsed").IsNumber()) n.string = -1;
             else {
                 n.sustain = noteObj.Get("sus").As<Napi::Number>().DoubleValue();
                 n.elapsed = noteObj.Get("elapsed").As<Napi::Number>().DoubleValue();
-                if (!readWhammy(noteObj, n.whammy, n.sustain)) n.string = -1;
+                if (!readWhammy(noteObj, n.whammy, n.sustain)
+                    || !readHarmonicContact(noteObj,n.harmonicContact,n.sustain,n.fret)) n.string = -1;
             }
         }
         req.notes.push_back(n);

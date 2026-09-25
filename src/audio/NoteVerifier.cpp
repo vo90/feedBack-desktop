@@ -267,7 +267,8 @@ void NoteVerifier::run()
             const auto& cn = chart.notes[i];
             const double grace = cn.harmonicTarget.feedback() || cn.whammy.present() ? 0 : susGraceFor(cn.sus);
 
-            if (playhead > cn.t + tol + grace)
+            const double deadline = cn.t + cn.harmonicContact.attackEnd(tol, grace);
+            if (playhead > deadline || (cn.harmonicContact.present() && playhead >= deadline))
                 passedIdx.push_back(i);
             // Sustain grace extends only the LATE edge — a note rings *after*
             // its onset, never before. The early edge is the plain timing
@@ -286,6 +287,7 @@ void NoteVerifier::run()
                 n.harmonic = cn.hm;
                 n.harmonicSemitones = cn.harmonicSemitones;
                 n.harmonicTarget = cn.harmonicTarget;
+                n.harmonicContact = cn.harmonicContact;
                 n.whammy = cn.whammy;
                 n.sustain = cn.sus;
                 n.elapsed = std::max(0., playhead - cn.t);

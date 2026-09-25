@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 #include "HarmonicTarget.h"
+#include "HarmonicContact.h"
 
 class InputRingReader;  // resolved in NoteVerifier.cpp — avoids a circular include
 
@@ -59,6 +60,7 @@ public:
         bool ho = false, po = false, b = false, sl = false, hm = false;
         int harmonicSemitones = -1;
         HarmonicTarget harmonicTarget;
+        HarmonicContact harmonicContact;
         Whammy whammy;
     };
 

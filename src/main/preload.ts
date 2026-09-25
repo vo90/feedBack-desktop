@@ -343,6 +343,7 @@ const feedBackDesktopApi = {
         // on a downlevel addon that predates ChordScorer so the caller
         // can fall back gracefully.
         harmonicTargetVersion: (): Promise<number> => ipcRenderer.invoke('audio:harmonicTargetVersion'),
+        harmonicContactVersion: (): Promise<number> => ipcRenderer.invoke('audio:harmonicContactVersion'),
         whammyVersion: (): Promise<number> => ipcRenderer.invoke('audio:whammyVersion'),
         scoreChord: (ctx: ChordScoreRequest): Promise<ChordScoreResult | null> =>
             ipcRenderer.invoke('audio:scoreChord', ctx),

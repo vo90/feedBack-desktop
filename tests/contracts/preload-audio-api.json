@@ -33,6 +33,7 @@
     "getStreamOverflowCount",
     "getStreamSinkLevel",
     "getStreamUnderflowCount",
+    "harmonicContactVersion",
     "harmonicTargetVersion",
     "isAudioRunning",
     "isAvailable",

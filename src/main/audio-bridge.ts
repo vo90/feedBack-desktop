@@ -795,6 +795,9 @@ export function initAudioBridge(): void {
         return audio && typeof audio.harmonicTargetVersion === 'function'
             && audio.harmonicTargetVersion() === 1 ? 1 : 0;
     });
+    ipcMain.handle('audio:harmonicContactVersion', () => {
+        return audio && typeof audio.harmonicContactVersion === 'function' && audio.harmonicContactVersion() === 1 ? 1 : 0;
+    });
     ipcMain.handle('audio:whammyVersion', () => {
         return audio && typeof audio.whammyVersion === 'function' && audio.whammyVersion() === 1 ? 1 : 0;
     });

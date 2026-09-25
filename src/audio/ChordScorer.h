@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include "HarmonicTarget.h"
+#include "HarmonicContact.h"
 #include "Whammy.h"
 
 class ChordScorer
@@ -63,6 +64,7 @@ public:
         bool harmonic = false;     // legacy hm without explicit pitch keeps its old behaviour
         int harmonicSemitones = -1; // hps: sounding semitones above tuned/capo open string
         HarmonicTarget harmonicTarget;
+        HarmonicContact harmonicContact;
         Whammy whammy;
         double sustain = 0, elapsed = 0;
     };

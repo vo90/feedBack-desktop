@@ -38,6 +38,7 @@
   "audio:getStreamOverflowCount",
   "audio:getStreamSinkLevel",
   "audio:getStreamUnderflowCount",
+  "audio:harmonicContactVersion",
   "audio:harmonicTargetVersion",
   "audio:isAudioRunning",
   "audio:isAvailable",

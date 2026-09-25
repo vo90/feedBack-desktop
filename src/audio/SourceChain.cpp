@@ -405,7 +405,7 @@ ChordScorer::Result SourceChain::scoreChord(const ChordScorer::Request& req)
     // the per-string energy/constraint check. `req.bypassMl` overrides this so the
     // renderer can force the DSP band-energy scorer.
     const bool explicitFretted = std::any_of(req.notes.begin(), req.notes.end(),
-        [](const auto& n) { return n.harmonicTarget.present() || n.whammy.present(); });
+        [](const auto& n) { return n.harmonicTarget.present() || n.whammy.present() || n.harmonicContact.present(); });
     // Generic active-pitch membership cannot test the semi mixture or the
     // selected partial. Keep those policies on the matching spectral scorer.
     if (! req.bypassMl && !explicitFretted && mlNoteDetector.isReady())

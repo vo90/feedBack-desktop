@@ -8,6 +8,7 @@
 #include "ChainOps.h"
 #include "HarmonicTargetBinding.h"
 #include "WhammyBinding.h"
+#include "HarmonicContactBinding.h"
 #include "../AudioEngine.h"
 #include "../VSTHost.h"
 #include "../VSTTrace.h"
@@ -791,7 +792,8 @@ Napi::Value setChartCore(Napi::Env env, Napi::Object reqObj, SourceChain* target
         }
         if (!readHarmonicTarget(noteObj, n.harmonicTarget, n.hm)
             || (n.harmonicTarget.present() && (n.fret < 0 || n.fret > 48))) return reject();
-        if (!readWhammy(noteObj, n.whammy, n.sus)) return reject();
+        if (!readWhammy(noteObj, n.whammy, n.sus)
+            || !readHarmonicContact(noteObj,n.harmonicContact,n.sus,n.fret)) return reject();
         // Chart owners must classify and remove visual-only targets before
         // arming the verifier. Do not turn an excluded event into a miss.
         if (n.whammy.present()) {
