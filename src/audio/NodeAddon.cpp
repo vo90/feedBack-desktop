@@ -51,6 +51,7 @@ using slopsmith::addon::EnableFileLogging;
 using slopsmith::addon::GetBackingDuration;
 using slopsmith::addon::GetBackingLevel;
 using slopsmith::addon::GetBackingPosition;
+using slopsmith::addon::GetBackingSnapshot;
 using slopsmith::addon::GetBufferSizes;
 using slopsmith::addon::GetChainGeneration;
 using slopsmith::addon::GetChainState;
@@ -447,6 +448,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("stopBacking", Napi::Function::New(env, StopBacking));
     exports.Set("seekBacking", Napi::Function::New(env, SeekBacking));
     exports.Set("getBackingPosition", Napi::Function::New(env, GetBackingPosition));
+    exports.Set("getBackingSnapshot", Napi::Function::New(env, GetBackingSnapshot));
     exports.Set("getBackingDuration", Napi::Function::New(env, GetBackingDuration));
     exports.Set("isBackingPlaying", Napi::Function::New(env, IsBackingPlaying));
     exports.Set("setBackingSpeed", Napi::Function::New(env, SetBackingSpeed));

@@ -9,10 +9,17 @@
 
 namespace slopsmith {
 
+void BackingPlayer::publishClockLocked()
+{
+    clockSnapshot.publish(cachedPosition.load(), juce::Time::getMillisecondCounterHiRes(),
+                          speed.load(), clockGeneration, playing.load(), ended);
+}
+
 bool BackingPlayer::load(const juce::File& file)
 {
     const juce::ScopedLock sl(lock);
     stopNoLock();
+    ended = false;
     transport.reset();
     readerSource.reset();
 
@@ -34,6 +41,7 @@ bool BackingPlayer::load(const juce::File& file)
         // doesn't keep displaying the previous track's position/duration.
         cachedPosition.store(0.0);
         cachedDuration.store(0.0);
+        publishClockLocked();
         return false;
     }
 
@@ -97,6 +105,9 @@ bool BackingPlayer::load(const juce::File& file)
     cachedDuration.store(transport->getLengthInSeconds());
     cachedPosition.store(0.0);
     heardPositionSec.store(0.0, std::memory_order_relaxed);
+    ended = false;
+    ++clockGeneration;
+    publishClockLocked();
 
     // Reset the loudness leveler for the new song: clearing the cached sample
     // rate forces renderBlockLocked() to re-prepare() it on the next block,
@@ -122,6 +133,9 @@ void BackingPlayer::setPosition(double seconds)
         const double pos = transport->getCurrentPosition();
         cachedPosition.store(pos);
         heardPositionSec.store(pos, std::memory_order_relaxed);
+        ended = false;
+        ++clockGeneration;
+        publishClockLocked();
     }
 }
 
@@ -132,8 +146,11 @@ void BackingPlayer::start()
     {
         transport->start();
         playing.store(true);
+        ended = false;
         heardPositionSec.store(transport->getCurrentPosition(),
                                std::memory_order_relaxed);
+        ++clockGeneration;
+        publishClockLocked();
     }
 }
 
@@ -144,6 +161,8 @@ void BackingPlayer::stopNoLock()
         transport->stop();
         stretch.reset();
         playing.store(false);
+        ++clockGeneration;
+        publishClockLocked();
     }
 }
 
@@ -203,6 +222,8 @@ void BackingPlayer::prepare(double sr, int bs)
         stretchLatencySamples.store(stretch.outputLatency(), std::memory_order_relaxed);
         inputBuffer.setSize(2, maxInputFrames, false, false, true);
         outputBuffer.setSize(2, bs, false, false, true);
+        ++clockGeneration;
+        publishClockLocked();
     }
 }
 
@@ -227,6 +248,7 @@ int BackingPlayer::renderBlockLocked(int numSamples)
         stretch.reset();
         heardPositionSec.store(transport->getCurrentPosition(),
                                std::memory_order_relaxed);
+        ++clockGeneration;
     }
 
     const double rate = juce::jlimit(0.01, kMaxSpeed, speed.load(std::memory_order_relaxed));
@@ -305,8 +327,11 @@ int BackingPlayer::renderBlockLocked(int numSamples)
     }
 
     // Sync the flag if transport stopped at EOF.
-    if (!transport->isPlaying())
+    if (!transport->isPlaying()) {
         playing.store(false);
+        ended = true;
+    }
+    publishClockLocked();
 
     // Normalize the backing track to a consistent target loudness (-12 LUFS)
     // BEFORE the mixer's backing-volume fader is applied (later in the RT

@@ -24,3 +24,22 @@ add_test(NAME renderer_bus COMMAND renderer_bus_test)
 add_executable(rate_match_test rate_match_test.cpp)
 target_compile_features(rate_match_test PRIVATE cxx_std_17)
 add_test(NAME rate_match COMMAND rate_match_test)
+
+add_executable(backing_clock_snapshot_test backing_clock_snapshot_test.cpp)
+target_compile_features(backing_clock_snapshot_test PRIVATE cxx_std_17)
+target_link_libraries(backing_clock_snapshot_test PRIVATE Threads::Threads)
+add_test(NAME backing_clock_snapshot COMMAND backing_clock_snapshot_test)
+
+# Available in the full addon build; the standalone pure-helper harness has no JUCE.
+if(TARGET juce::juce_audio_formats)
+    add_executable(backing_player_clock_test backing_player_clock_test.cpp
+        ../../src/audio/engine/BackingPlayer.cpp)
+    target_compile_features(backing_player_clock_test PRIVATE cxx_std_20)
+    target_include_directories(backing_player_clock_test PRIVATE
+        ../../src/audio/third_party/signalsmith-stretch ../../src/audio/third_party)
+    target_compile_definitions(backing_player_clock_test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(backing_player_clock_test PRIVATE
+        juce::juce_audio_devices juce::juce_audio_formats)
+    add_test(NAME backing_player_clock COMMAND backing_player_clock_test)
+endif()
