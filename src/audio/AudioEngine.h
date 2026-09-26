@@ -223,6 +223,7 @@ public:
     // Non-blocking reads — never acquire the backing lock / block the audio callback
     bool isBackingPlaying() const { return backing.isPlaying(); }
     double getBackingPosition() const { return backing.getPosition(); }
+    slopsmith::BackingClockSample getBackingSnapshot() const { return backing.getClockSnapshot(); }
     double getBackingDuration() const { return backing.getDuration(); }
 
     // Metering (read from any thread — atomic). Input level/peak are per-source

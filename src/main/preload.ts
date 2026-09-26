@@ -9,6 +9,13 @@ import type { StartupStatus } from './python';
 import type { ResetSelection, ResetSummary } from './config-reset';
 import type { ConfigPathCategories } from './config-paths';
 
+type BackingSnapshot = {
+    version: 1; valid: boolean; position: number; ageMs: number;
+    sequence: number; generation: number; rate: number; playing: boolean; ended: boolean;
+    clockId?: number; readAtMs?: number; readUncertaintyMs?: number;
+};
+let backingSnapshotToken = 0;
+
 // Shape returned by maintenance.getPaths() — the enumerated per-OS categories
 // plus the resolved active CONFIG_DIR and a flag for the shared Docker dir.
 export interface MaintenancePaths {
@@ -494,6 +501,22 @@ const feedBackDesktopApi = {
         stopBacking: () => ipcRenderer.invoke('audio:stopBacking'),
         seekBacking: (seconds: number) => ipcRenderer.invoke('audio:seekBacking', seconds),
         getBackingPosition: (): Promise<number> => ipcRenderer.invoke('audio:getBackingPosition'),
+        getBackingSnapshot: (): Promise<BackingSnapshot | null> => ipcRenderer.invoke('audio:getBackingSnapshot'),
+        subscribeBackingSnapshots: (callback: (snapshot: BackingSnapshot) => void): (() => void) => {
+            const token = ++backingSnapshotToken;
+            let active = true;
+            const listener = (_event: unknown, receivedToken: number, snapshot: BackingSnapshot) => {
+                if (active && receivedToken === token) callback(snapshot);
+            };
+            ipcRenderer.on('audio:backingSnapshot', listener);
+            ipcRenderer.send('audio:subscribeBackingSnapshots', token);
+            return () => {
+                if (!active) return;
+                active = false;
+                ipcRenderer.removeListener('audio:backingSnapshot', listener);
+                ipcRenderer.send('audio:unsubscribeBackingSnapshots', token);
+            };
+        },
         getBackingDuration: (): Promise<number> => ipcRenderer.invoke('audio:getBackingDuration'),
         isBackingPlaying: (): Promise<boolean> => ipcRenderer.invoke('audio:isBackingPlaying'),
         setBackingSpeed: (speed: number): Promise<boolean> => ipcRenderer.invoke('audio:setBackingSpeed', speed),

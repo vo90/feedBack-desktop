@@ -9,6 +9,7 @@ import { app } from 'electron';
 import { isDebugEnabled, getDebugLogPath } from './debug-log';
 import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
+import { readBackingSnapshot, createBackingClockPublisher } from './backing-clock';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
@@ -1327,6 +1328,10 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:stopBacking', () => audio?.stopBacking());
     ipcMain.handle('audio:seekBacking', (_event, seconds: number) => audio?.seekBacking(seconds));
     ipcMain.handle('audio:getBackingPosition', () => audio?.getBackingPosition() ?? 0);
+    ipcMain.handle('audio:getBackingSnapshot', () => readBackingSnapshot(audio));
+    const backingClockPublisher = createBackingClockPublisher(() => readBackingSnapshot(audio));
+    ipcMain.on('audio:subscribeBackingSnapshots', (event, token: number) => backingClockPublisher.start(event.sender, token));
+    ipcMain.on('audio:unsubscribeBackingSnapshots', (event, token: number) => backingClockPublisher.stop(event.sender, token));
     ipcMain.handle('audio:getBackingDuration', () => audio?.getBackingDuration() ?? 0);
     ipcMain.handle('audio:isBackingPlaying', () => audio?.isBackingPlaying() ?? false);
     ipcMain.handle('audio:setBackingSpeed', (_event, speed: number) => {

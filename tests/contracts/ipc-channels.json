@@ -15,6 +15,7 @@
   "audio:getBackingDuration",
   "audio:getBackingLevel",
   "audio:getBackingPosition",
+  "audio:getBackingSnapshot",
   "audio:getBufferSizes",
   "audio:getChainState",
   "audio:getCurrentDevice",
@@ -104,7 +105,9 @@
   "audio:startBacking",
   "audio:stopAudio",
   "audio:stopBacking",
+  "audio:subscribeBackingSnapshots",
   "audio:unbindInputDevice",
+  "audio:unsubscribeBackingSnapshots",
   "audio:whammyVersion",
   "debug:isEnabled"
 ]
