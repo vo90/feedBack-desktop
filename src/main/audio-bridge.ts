@@ -792,6 +792,16 @@ export function initAudioBridge(): void {
     // require a mutex around ChordScorer's reusable FFT/scratch state.
     // The trade-off doesn't pay back for this workload — revisit only
     // if profiling shows actual main-loop stalls.
+    ipcMain.handle('audio:harmonicTargetVersion', () => {
+        return audio && typeof audio.harmonicTargetVersion === 'function'
+            && audio.harmonicTargetVersion() === 1 ? 1 : 0;
+    });
+    ipcMain.handle('audio:harmonicContactVersion', () => {
+        return audio && typeof audio.harmonicContactVersion === 'function' && audio.harmonicContactVersion() === 1 ? 1 : 0;
+    });
+    ipcMain.handle('audio:whammyVersion', () => {
+        return audio && typeof audio.whammyVersion === 'function' && audio.whammyVersion() === 1 ? 1 : 0;
+    });
     ipcMain.handle('audio:scoreChord', (_event, ctx: unknown) => {
         // Feature-detect the native method the same way getSampleRate
         // above does — a downlevel addon (pre-ChordScorer build) should
@@ -827,12 +837,12 @@ export function initAudioBridge(): void {
     // The optional (songTime, playing) args push the renderer's unified
     // playhead — the plugin calls this once per detect tick, so the push rides
     // the same IPC as the drain.
-    ipcMain.handle('audio:getNoteVerdicts', (_event, songTime: unknown, playing: unknown) => {
+    ipcMain.handle('audio:getNoteVerdicts', (_event, songTime: unknown, playing: unknown, playbackRate?: unknown) => {
         if (!audio || typeof audio.getNoteVerdicts !== 'function') return null;
         try {
             if (typeof songTime === 'number' && Number.isFinite(songTime)
                 && typeof playing === 'boolean') {
-                return audio.getNoteVerdicts(songTime, playing);
+                return audio.getNoteVerdicts(songTime, playing, playbackRate);
             }
             return audio.getNoteVerdicts();
         } catch (e: unknown) {
@@ -1072,13 +1082,13 @@ export function initAudioBridge(): void {
         }
     });
 
-    ipcMain.handle('audio:getSourceNoteVerdicts', (_event, id: unknown, songTime: unknown, playing: unknown) => {
+    ipcMain.handle('audio:getSourceNoteVerdicts', (_event, id: unknown, songTime: unknown, playing: unknown, playbackRate?: unknown) => {
         if (!audio || typeof audio.getSourceNoteVerdicts !== 'function') return null;
         if (!validSourceId(id)) return null;
         try {
             if (typeof songTime === 'number' && Number.isFinite(songTime)
                 && typeof playing === 'boolean') {
-                return audio.getSourceNoteVerdicts(id, songTime, playing);
+                return audio.getSourceNoteVerdicts(id, songTime, playing, playbackRate);
             }
             return audio.getSourceNoteVerdicts(id);
         } catch (e: unknown) {

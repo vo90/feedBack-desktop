@@ -37,6 +37,7 @@
   "getStreamOverflowCount",
   "getStreamSinkLevel",
   "getStreamUnderflowCount",
+  "harmonicContactVersion",
   "init",
   "isAudioRunning",
   "isBackingPlaying",
@@ -105,5 +106,6 @@
   "startBacking",
   "stopAudio",
   "stopBacking",
-  "unbindInputDevice"
+  "unbindInputDevice",
+  "whammyVersion"
 ]

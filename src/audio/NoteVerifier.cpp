@@ -97,34 +97,38 @@ std::vector<NoteVerifier::Verdict> NoteVerifier::drainVerdicts()
     return out;
 }
 
-void NoteVerifier::setPlayhead(double songTime, bool playing)
+void NoteVerifier::setPlayhead(double songTime, bool playing, double playbackRate)
 {
+    if (!std::isfinite(songTime) || !std::isfinite(playbackRate) || playbackRate <= 0 || playbackRate > 4) return;
     {
         // Publish the timing trio as one snapshot under `lock` so
         // currentPlayhead() can never read a half-updated set.
         const juce::ScopedLock sl(lock);
         pushedReceiptMs = juce::Time::getMillisecondCounterHiRes();
         // Shift by this source's capture-latency correction (0 on the primary).
-        pushedSongTime = songTime - playheadOffsetSec.load(std::memory_order_relaxed);
+        pushedSongTime = songTime - playheadOffsetSec.load(std::memory_order_relaxed) * playbackRate;
+        pushedPlaybackRate = playbackRate;
         pushedPlaying = playing;
     }
     havePushedPlayhead.store(true);
 }
 
-double NoteVerifier::currentPlayhead() const
+double NoteVerifier::currentPlayhead(double* playbackRate) const
 {
-    double base, receiptMs;
+    double base, receiptMs, rate;
     bool playing;
     {
         const juce::ScopedLock sl(lock);
         base      = pushedSongTime;
         receiptMs = pushedReceiptMs;
         playing   = pushedPlaying;
+        rate      = pushedPlaybackRate;
     }
+    if (playbackRate) *playbackRate = rate;
     const double ageMs = juce::Time::getMillisecondCounterHiRes() - receiptMs;
     if (ageMs > kPlayheadStaleMs) return base;   // tick stopped — freeze
     if (! playing)                return base;   // paused — hold
-    return base + ageMs / 1000.0;                // playing — interpolate forward
+    return base + ageMs / 1000.0 * rate;          // advance in source song time
     // Note: after a stale freeze the playhead jumps forward on the first
     // fresh push; any note whose whole window was traversed during the freeze
     // finalizes as a miss next tick — correct, detection genuinely was down.
@@ -181,7 +185,8 @@ void NoteVerifier::run()
 
     // The playhead for this whole pass — interpolated from the last push so
     // every note here is judged against the same chart position.
-    const double playhead = currentPlayhead();
+    double playbackRate = 1;
+    const double playhead = currentPlayhead(&playbackRate);
 
     double sr = engine.getCurrentSampleRate();
     if (! std::isfinite(sr) || sr <= 0.0) sr = 48000.0;
@@ -202,7 +207,7 @@ void NoteVerifier::run()
             onsetDetector.process(fresh.data(), fresh.size(), firstIdx, onsets);
             for (const auto& o : onsets)
             {
-                const double songT = playhead - (double) (w - o.sampleIndex) / sr;
+                const double songT = playhead - (double) (w - o.sampleIndex) / sr * playbackRate;
                 onsetLog.push_back({ songT, false });
             }
         }
@@ -260,9 +265,10 @@ void NoteVerifier::run()
         {
             if (i >= state.size() || state[i].finalized) continue;
             const auto& cn = chart.notes[i];
-            const double grace = susGraceFor(cn.sus);
+            const double grace = cn.harmonicTarget.feedback() || cn.whammy.present() ? 0 : susGraceFor(cn.sus);
 
-            if (playhead > cn.t + tol + grace)
+            const double deadline = cn.t + cn.harmonicContact.attackEnd(tol, grace);
+            if (playhead > deadline || (cn.harmonicContact.present() && playhead >= deadline))
                 passedIdx.push_back(i);
             // Sustain grace extends only the LATE edge — a note rings *after*
             // its onset, never before. The early edge is the plain timing
@@ -279,6 +285,12 @@ void NoteVerifier::run()
                 n.bend = cn.b;
                 n.slide = cn.sl;
                 n.harmonic = cn.hm;
+                n.harmonicSemitones = cn.harmonicSemitones;
+                n.harmonicTarget = cn.harmonicTarget;
+                n.harmonicContact = cn.harmonicContact;
+                n.whammy = cn.whammy;
+                n.sustain = cn.sus;
+                n.elapsed = std::max(0., playhead - cn.t);
                 batch.push_back({ i, n });
             }
         }
@@ -292,7 +304,7 @@ void NoteVerifier::run()
     // The comb only answers "is this note's pitch present?" — timing comes
     // from the onset log. Score every open-window note against the latest
     // input frame.
-    struct ScoredNote { size_t index; bool present; float centsError; float snr; };
+    struct ScoredNote { size_t index; bool present; float centsError; float snr; double targetFret; };
     std::vector<ScoredNote> scored;
 
     if (! batch.empty())
@@ -322,6 +334,7 @@ void NoteVerifier::run()
             s.index = batch[i].index;
             s.present = result.results[i].hit;
             s.centsError = result.results[i].centsError;
+            s.targetFret = result.results[i].targetFret;
             s.snr = result.results[i].bandEnergy;  // harmonicVerify puts SNR here
             scored.push_back(s);
         }
@@ -343,7 +356,7 @@ void NoteVerifier::run()
             if (! s.present) continue;
             ++st.presentFrames;
             st.everPresent = true;
-            if (s.snr > st.bestSnr) { st.bestSnr = s.snr; st.bestCents = s.centsError; }
+            if (s.snr > st.bestSnr) { st.bestSnr = s.snr; st.bestCents = s.centsError; st.bestTargetFret = s.targetFret; }
         }
 
         const double tol = ctx.timingTolerance;
@@ -360,7 +373,7 @@ void NoteVerifier::run()
             // fraction of the note's scored frames — rejecting wrong-position
             // notes that only flicker present on a few stray frames while keeping
             // correctly-fretted notes, which ring through most of their window.
-            const bool hit = (ctx.presenceRatio <= 0.0f)
+            const bool hit = (ctx.presenceRatio <= 0.0f || cn.harmonicTarget.feedback() || cn.whammy.present())
                 ? st.everPresent
                 : (st.presentFrames > 0
                    && (double) st.presentFrames
@@ -400,6 +413,7 @@ void NoteVerifier::run()
                 v.detected = true;
                 v.detectedSongTime = when;
                 v.centsError = st.bestCents;
+                v.targetFret = st.bestTargetFret;
                 v.snr = st.bestSnr;
                 pending.push_back(v);
             }

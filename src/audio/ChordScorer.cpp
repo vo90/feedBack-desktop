@@ -166,6 +166,8 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
 {
     Result out{};
     out.totalStrings = (int) req.notes.size();
+    for (const auto& n : req.notes)
+        if (!barLimitation(n,req).empty()) --out.totalStrings;
 
     // Build the all-miss shape every validation-failure path returns.
     // The caller's contract is one result entry per requested note
@@ -182,6 +184,7 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             NoteResult r{};
             r.string = n.string;
             r.fret = n.fret;
+            r.exclusionReason = barLimitation(n,req);
             out.results.push_back(r);
         }
     };
@@ -196,7 +199,7 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
         fillMissResults();
         return out;
     }
-    if (out.totalStrings == 0) return out;
+    if (out.totalStrings == 0) { fillMissResults(); return out; }
 
     // Validate request shape. Unsupported (arrangement, stringCount)
     // pairs and undersized/mismatched tuningOffsets used to silently
@@ -214,7 +217,14 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
     }
     for (const auto& n : req.notes)
     {
-        if (n.string < 0 || n.string >= req.stringCount)
+        if (n.string < 0 || n.string >= req.stringCount
+            || n.harmonicSemitones < -1 || n.harmonicSemitones == 0 || n.harmonicSemitones > 48
+            || (n.harmonicSemitones > 0 && !n.harmonic)
+            || !n.harmonicContact.valid(n.sustain,n.fret)
+            || (n.harmonicContact.present() && (n.harmonic || n.harmonicSemitones != -1
+                || n.harmonicTarget.present() || n.elapsed >= n.harmonicContact.start))
+            || !n.harmonicTarget.valid() || !n.whammy.valid(n.sustain) || !std::isfinite(n.elapsed)
+            || (n.harmonicTarget.present() && (n.harmonic || n.harmonicSemitones != -1 || n.fret < 0 || n.fret > 48)))
         {
             fillMissResults();
             return out;
@@ -248,6 +258,8 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
     out.results.reserve(req.notes.size());
     const int nBins = (int) magnitudes.size();
     int hits = 0;
+    std::vector<NoteResult> barResults;
+    barResults.reserve(req.notes.size());
     for (const auto& note : req.notes)
     {
         // Per-technique threshold adjustments, mirroring screen.js.
@@ -257,23 +269,42 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             energyThreshold = kEnergyThresholdSoftAttack;
         if (note.bend || note.slide)
             cents = std::max(cents, kBendSlideCentsFloor);
-        if (note.harmonic)
-            cents = 0.0f; // energy-only
+        const bool preciseHarmonic = note.harmonic && note.harmonicSemitones > 0;
+        const bool frettedHarmonic = note.harmonicTarget.present();
+        if (preciseHarmonic || frettedHarmonic)
+            cents = req.pitchCheckCents > 0 ? req.pitchCheckCents : 50.0f;
+        else if (note.harmonic)
+            cents = 0.0f; // legacy energy-only
+        if (note.whammy.present()) cents = req.pitchCheckCents > 0 ? req.pitchCheckCents : 50.0f;
 
         NoteResult nr{};
+        NoteResult shifted{};
         nr.string = note.string;
         nr.fret = note.fret;
+        nr.exclusionReason = barLimitation(note,req);
+        if (!nr.exclusionReason.empty()) {
+            out.results.push_back(nr); barResults.push_back(nr);
+            continue;
+        }
 
-        if (req.harmonicVerify)
+        if (frettedHarmonic && (note.bend || note.slide)) cents = std::max(cents, kBendSlideCentsFloor);
+        if (req.harmonicVerify || preciseHarmonic || frettedHarmonic || note.whammy.present())
         {
+            // Two allowed interpretations of a feedback attack still produce
+            // exactly one result. Reuse this spectrum; never create a second note.
+            auto checkComb = [&](bool ordinary, double shift) -> NoteResult {
+            NoteResult nr{}; nr.string = note.string; nr.fret = note.fret;
             // ── Harmonic-comb verification ──────────────────────────────
             // Score the note by the energy at its expected harmonics
             // (f, 2f .. 5f) relative to the off-harmonic spectral floor
             // sampled between them. No whole-spectrum division, so a bright
             // or broadband signal does not dilute the measurement.
-            const int expectedMidi =
-                midiFromStringFret(note.string, note.fret, base, req.tuningOffsets, req.capo);
+            const double expectedMidi =
+                midiFromStringFret(note.string, preciseHarmonic ? 0 : note.fret, base, req.tuningOffsets, req.capo)
+                + (preciseHarmonic ? naturalPitchSemitones(note.harmonicSemitones)
+                   : frettedHarmonic && !ordinary ? naturalPitchSemitones(note.harmonicTarget.interval) : 0.0) + shift;
             const double f0 = 440.0 * std::pow(2.0, (expectedMidi - 69) / 12.0);
+            nr.targetFret = expectedMidi - midiFromStringFret(note.string, 0, base, req.tuningOffsets, req.capo);
 
             // Refined peak frequency + magnitude in a ±~half-semitone window
             // around `targetHz`. The window doubles as the pitch tolerance:
@@ -294,6 +325,9 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
                     }
                 }
                 outMag = pk;
+                if (note.whammy.present() && (pkBin <= 0 || pkBin >= nBins - 1
+                    || magnitudes[(size_t) pkBin] < magnitudes[(size_t) (pkBin-1)]
+                    || magnitudes[(size_t) pkBin] < magnitudes[(size_t) (pkBin+1)])) outMag = 0;
                 const float d = (pkBin > 0 && pkBin < nBins - 1)
                     ? parabolicOffset(magnitudes[(size_t) (pkBin - 1)],
                                       magnitudes[(size_t) pkBin],
@@ -384,7 +418,7 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             // the 0.20 default; bass passes a lower value because its DI
             // fundamental is legitimately weak, and `<= 0` disables the gate.
             const bool fundamentalPresent =
-                note.harmonic
+                (note.harmonic && !preciseHarmonic)
              || req.fundamentalRatio <= 0.0f
              || maxHarmMag <= 0.0f
              || fundMag >= req.fundamentalRatio * maxHarmMag;
@@ -395,9 +429,48 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             nr.hasCents = true;
             nr.centsDiff = std::abs(centsError);
             nr.centsError = centsError;
+            // A lower note's strong second/third partial can otherwise feed
+            // this comb. For a lone precise target, reject a stronger lower
+            // fundamental. Chords may legitimately contain that lower note.
+            float lower2 = 0.0f, lower3 = 0.0f;
+            if ((preciseHarmonic || note.whammy.present()) && req.notes.size() == 1) {
+                peakNear(f0 / 2, lower2);
+                peakNear(f0 / 3, lower3);
+            }
+            bool selectedPartial = true;
+            if (frettedHarmonic && !ordinary) {
+                const double baseMidi = midiFromStringFret(note.string, note.fret, base, req.tuningOffsets, req.capo) + shift;
+                const double baseHz = 440.0 * std::pow(2.0, (baseMidi - 69) / 12.0);
+                float baseMag = 0;
+                peakNear(baseHz, baseMag);
+                // Semi allows a substantial fretted component; strict forms
+                // require the selected partial to dominate it. This is spectral
+                // evidence, not a claim to identify the player's hand gesture.
+                selectedPartial = fundMag >= baseMag * (note.harmonicTarget.mixed() ? 0.65f : 1.05f);
+                // A bright ordinary string has many competing upper partials.
+                // The selected one must stand out among the other low partials.
+                for (int h = 2; h <= 8; ++h) {
+                    const double ratio = h / std::pow(2.0, naturalPitchSemitones(note.harmonicTarget.interval) / 12.0);
+                    if (std::abs(ratio - std::round(ratio)) < .001) continue;
+                    float other = 0; peakNear(baseHz * h, other);
+                    if (other > fundMag * 1.05f) selectedPartial = false;
+                }
+            }
             nr.hit = (snr >= req.harmonicSnr)
                   && fundamentalPresent
+                  && selectedPartial
+                  && std::max(lower2, lower3) <= fundMag
                   && (cents <= 0.0f || std::abs(centsError) <= cents);
+            return nr;
+            };
+            nr = checkComb(false, 0);
+            if (!nr.hit && note.harmonicTarget.feedback()) nr = checkComb(true, 0);
+            shifted = nr;
+            const double barPitch = note.whammy.pitch(note.elapsed);
+            if (note.whammy.present() && std::abs(barPitch) > 1e-9) {
+                shifted = checkComb(false, barPitch);
+                if (!shifted.hit && note.harmonicTarget.feedback()) shifted = checkComb(true, barPitch);
+            }
         }
         else
         {
@@ -459,12 +532,70 @@ ChordScorer::Result ChordScorer::scoreChord(const float* buffer, int numSamples,
             }
         }
 
-        if (nr.hit) ++hits;
+        if (!note.whammy.present()) shifted = nr;
         out.results.push_back(nr);
+        barResults.push_back(shifted);
     }
+
+    // A shared authored bar gesture selects one coherent alternative. Never
+    // assemble a chord by independently choosing shifted/unshifted strings.
+    for (size_t i=0; i<req.notes.size(); ++i) {
+        const auto* segment = req.notes[i].whammy.at(req.notes[i].elapsed);
+        if (!segment) continue;
+        bool visited = false;
+        for (size_t j=0; j<i; ++j) {
+            const auto* other = req.notes[j].whammy.at(req.notes[j].elapsed);
+            if (other && other->group == segment->group) { visited = true; break; }
+        }
+        if (visited) continue;
+        int plainHits=0, shiftedHits=0;
+        for (size_t j=i; j<req.notes.size(); ++j) {
+            const auto* other = req.notes[j].whammy.at(req.notes[j].elapsed);
+            if (other && other->group == segment->group) {
+                plainHits += out.results[j].hit; shiftedHits += barResults[j].hit;
+            }
+        }
+        if (shiftedHits > plainHits)
+            for (size_t j=i; j<req.notes.size(); ++j) {
+                const auto* other = req.notes[j].whammy.at(req.notes[j].elapsed);
+                if (other && other->group == segment->group) out.results[j] = barResults[j];
+            }
+    }
+    for (const auto& result : out.results) if (result.hit) ++hits;
 
     out.hitStrings = hits;
     out.score = out.totalStrings > 0 ? (float) hits / (float) out.totalStrings : 0.0f;
-    out.isHit = out.score >= req.minHitRatio;
+    out.isHit = out.totalStrings > 0 && out.score >= req.minHitRatio;
     return out;
+}
+double ChordScorer::naturalPitchSemitones(int semitones)
+{
+    int partial = 0;
+    switch (semitones) {
+        case 12: partial=2; break;
+        case 19: partial=3; break;
+        case 24: partial=4; break;
+        case 28: partial=5; break;
+        case 31: partial=6; break;
+        case 34: partial=7; break;
+        case 36: partial=8; break;
+        default: return semitones; // no inferred partial for unknown metadata
+    }
+    return 12.0 * std::log2((double) partial);
+}
+
+std::string ChordScorer::barLimitation(const Note& n, const Request& req)
+{
+    auto reason=n.whammy.limitation(n.bend,n.slide,n.harmonic && n.harmonicSemitones<=0);
+    if (!reason.empty() || !n.whammy.present()) return reason;
+    const auto* base=standardMidiFor(req.arrangement,req.stringCount);
+    if (!base || n.string<0 || n.string>=req.stringCount || (int)req.tuningOffsets.size()!=req.stringCount) return {};
+    double pitch=(*base)[n.string]+req.tuningOffsets[n.string]+req.capo;
+    pitch+=n.harmonic && n.harmonicSemitones>0 ? naturalPitchSemitones(n.harmonicSemitones) : n.fret;
+    if(n.harmonicTarget.present() && !n.harmonicTarget.feedback()) pitch+=naturalPitchSemitones(n.harmonicTarget.interval);
+    double lowest=0;
+    for(const auto& s:n.whammy.segments) for(const auto& p:s.curve) lowest=std::min(lowest,p.v);
+    // A deterministic common browser/native floor, established with short
+    // attack-window fixtures. Do not exclude only after listening to a miss.
+    return pitch+lowest < 22 ? "bar_pitch_below_verified_range" : std::string{};
 }

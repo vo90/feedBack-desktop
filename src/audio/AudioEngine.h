@@ -334,7 +334,7 @@ public:
     // Renderer's unified, already-corrected playhead — the verifier scores
     // against this rather than getBackingPosition(), which is frozen for
     // HTML5-routed (sloppak) songs. Pushed each detect tick via getNoteVerdicts.
-    void setPlayhead(double songTime, bool playing) { source0().setPlayhead(songTime, playing); }
+    void setPlayhead(double songTime, bool playing, double rate = 1.0) { source0().setPlayhead(songTime, playing, rate); }
 
     // ── Multi-input source management ─────────────────────────────────────────
     // A "source" is one independent input chain (its own arrangement chart, note

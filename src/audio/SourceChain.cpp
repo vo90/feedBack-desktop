@@ -404,7 +404,11 @@ ChordScorer::Result SourceChain::scoreChord(const ChordScorer::Request& req)
     // detector's active-pitch set — genuine polyphonic transcription rather than
     // the per-string energy/constraint check. `req.bypassMl` overrides this so the
     // renderer can force the DSP band-energy scorer.
-    if (! req.bypassMl && mlNoteDetector.isReady())
+    const bool explicitFretted = std::any_of(req.notes.begin(), req.notes.end(),
+        [](const auto& n) { return n.harmonicTarget.present() || n.whammy.present() || n.harmonicContact.present(); });
+    // Generic active-pitch membership cannot test the semi mixture or the
+    // selected partial. Keep those policies on the matching spectral scorer.
+    if (! req.bypassMl && !explicitFretted && mlNoteDetector.isReady())
         return scoreChordWithMl(req);
 
     // Snapshot the input ring at the requested window size and forward to the
@@ -500,7 +504,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             // Sum in 64-bit: base/off/capo/fret arrive from IPC as 32-bit ints,
             // so an int sum could overflow before the range check.
             const long long expectedMidi =
-                (long long) (*base)[(size_t) n.string] + off + req.capo + n.fret;
+                (long long) (*base)[(size_t) n.string] + off + req.capo + (n.harmonic && n.harmonicSemitones > 0 ? n.harmonicSemitones : n.fret);
             if (expectedMidi < 0 || expectedMidi > 127)
             {
                 allValid = false;
@@ -540,7 +544,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             const int off = (n.string < (int) req.tuningOffsets.size())
                                 ? req.tuningOffsets[(size_t) n.string] : 0;
             const int expectedMidi = (int) (
-                (long long) (*base)[(size_t) n.string] + off + req.capo + n.fret);
+                (long long) (*base)[(size_t) n.string] + off + req.capo + (n.harmonic && n.harmonicSemitones > 0 ? n.harmonicSemitones : n.fret));
 
             float conf = 0.0f;
             bool active = mlNoteDetector.isPitchActive(expectedMidi, &conf);
@@ -555,7 +559,7 @@ ChordScorer::Result SourceChain::scoreChordWithMl(const ChordScorer::Request& re
             }
             // Harmonic: the fretted fundamental is suppressed and an overtone
             // sounds — accept the octave or octave+fifth above.
-            if (! active && n.harmonic)
+            if (! active && n.harmonic && n.harmonicSemitones < 0)
                 active = mlNoteDetector.isPitchActive(expectedMidi + 12, &conf)
                       || mlNoteDetector.isPitchActive(expectedMidi + 19, &conf);
 

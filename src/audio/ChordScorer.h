@@ -19,6 +19,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "HarmonicTarget.h"
+#include "HarmonicContact.h"
+#include "Whammy.h"
 
 class ChordScorer
 {
@@ -30,6 +33,12 @@ public:
     // or any unknown arrangement string) — caller is expected to fail
     // the request rather than guess a fallback tuning.
     static const std::vector<int>* standardMidiFor(const std::string& arrangement, int stringCount);
+
+    // The source's integer MIDI offset describes an overtone using equal-
+    // tempered notation. Grade the actual natural partial, preserving that
+    // stored source value. In particular the seventh partial is 31 cents flat
+    // of its nearest equal-tempered note; widening every pitch gate is wrong.
+    static double naturalPitchSemitones(int sourceSemitones);
 
     // Hard upper bound on the FFT size we will ever build. The 3 Hz
     // bin-width floor in scoreChord() implies fftSize ≈ nextPow2(SR/3),
@@ -52,7 +61,12 @@ public:
         bool pullOff = false;      // po — same
         bool bend = false;         // b  — pitch moving, widen pitch window
         bool slide = false;        // sl — same
-        bool harmonic = false;     // hm — energy-only check, skip pitch
+        bool harmonic = false;     // legacy hm without explicit pitch keeps its old behaviour
+        int harmonicSemitones = -1; // hps: sounding semitones above tuned/capo open string
+        HarmonicTarget harmonicTarget;
+        HarmonicContact harmonicContact;
+        Whammy whammy;
+        double sustain = 0, elapsed = 0;
     };
 
     // Per-note scoring result. Same field names as the JS shape so the
@@ -71,6 +85,8 @@ public:
         bool hasCents = false;
         float centsDiff = 0.0f;
         float centsError = 0.0f;
+        double targetFret = -1; // selected sounding offset above the tuned/capo open string
+        std::string exclusionReason; // capability decision; never inferred from the input signal
     };
 
     struct Request
@@ -124,6 +140,8 @@ public:
         bool isHit = false;
         std::vector<NoteResult> results;
     };
+
+    static std::string barLimitation(const Note&, const Request&);
 
     ChordScorer() = default;
 
