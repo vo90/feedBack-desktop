@@ -39,6 +39,15 @@ test('peer closure is visible so the renderer can recover', () => {
     const {bridge} = harness(), port = new Port(); bridge.attach(1,'one',port); port.close();
     assert.equal(bridge.has(1,'one'),false);
 });
+test('an open port without valid audio becomes unhealthy; regular silence keeps it alive', () => {
+    let time = 0;
+    const bridge = createRendererAudioPortBridge(() => {}, () => time), port = new Port();
+    bridge.attach(1,'one',port); assert.equal(bridge.has(1,'one'),true);
+    time = 2001; assert.equal(bridge.has(1,'one'),false);
+    port.send(new Float32Array(512)); assert.equal(bridge.has(1,'one'),true);
+    time += 1000; port.send([],48000); time += 1001;
+    assert.equal(bridge.has(1,'one'),false, 'invalid packets cannot keep a dead stream healthy');
+});
 test('malformed rates, PCM and IDs cannot reach the native addon', () => {
     const {bridge,pushed} = harness(), invalid = new Port(), port = new Port();
     assert.equal(bridge.attach(1,{},invalid),false); assert.equal(invalid.closed,true);
