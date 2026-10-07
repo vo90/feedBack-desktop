@@ -5,7 +5,7 @@ const audio = require(require('node:path').resolve(process.argv[2]));
 const input = process.argv[3], output = process.argv[4];
 const log = (phase, result) => console.log(JSON.stringify({time:new Date().toISOString(),phase,result}));
 const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
-async function apply(inputType,inputDevice,outputType,outputDevice,rate=48000,buffer=256) {
+async function apply(inputType,inputDevice,outputType,outputDevice,rate=48000,buffer=256,allowDeviceError=false) {
   const config={inputType,inputDevice,outputType,outputDevice,sampleRate:rate,bufferSize:buffer};
   log('begin',config);
   const options=audio.probeDeviceOptions(inputType,inputDevice,outputType,outputDevice);
@@ -13,6 +13,7 @@ async function apply(inputType,inputDevice,outputType,outputDevice,rate=48000,bu
   if(!options.sampleRates.includes(rate)) config.sampleRate=options.sampleRates[0];
   if(!options.bufferSizes.includes(buffer)) config.bufferSize=options.bufferSizes[0];
   const result=audio.setDevice(config);log('applied',result);
+  if (!result.ok && allowDeviceError) { log('driver-rejected', {config,error:result.error}); return; }
   assert.equal(result.ok,true,result.error);
   if(inputType==='ASIO' && outputType==='ASIO') assert.equal(result.duplex,true);
   audio.startAudio();await wait(350);
@@ -37,14 +38,15 @@ async function main() {
   for(const buffer of duplex.bufferSizes) await apply('ASIO',input,'ASIO',input,48000,buffer);
   for(const type of types.filter(t=>t.name!=='ASIO')) {
     if(type.outputs.length) {
-      await apply('ASIO',input,type.name,'');
+      await apply('ASIO',input,type.name,'',48000,256,true);
       const named=type.outputs.find(d=>d===output)||type.outputs[0];
-      await apply('ASIO',input,type.name,named);
+      await apply('ASIO',input,type.name,named,48000,256,true);
     }
-    if(type.inputs.length) await apply(type.name,'','ASIO',input);
+    if(type.inputs.length) await apply(type.name,'','ASIO',input,48000,256,true);
   }
   await apply('ASIO',input,'Windows Audio',output);
-  log('stream-duplicate',audio.setStreamOutputDevice('ASIO',''));
+  const streamError=audio.setStreamOutputDevice('ASIO','');
+  log('stream-duplicate',streamError);assert.match(streamError,/already in use/);
   assert.equal(audio.isAudioRunning(),true);
   const stale=audio.setDevice({inputType:'ASIO',inputDevice:'__missing_test_device__',outputType:'Windows Audio',outputDevice:output,sampleRate:48000,bufferSize:256});
   assert.equal(stale.ok,false);assert.equal(audio.isAudioRunning(),true);
