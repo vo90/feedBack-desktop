@@ -6,6 +6,7 @@
 #include "../../src/audio/engine/RendererBus.h"
 
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -32,9 +33,9 @@ static void testEqualRateBitExact()
     RendererBus bus;
     bus.setEnabled(true, 1.0f);
     const auto c1 = rampChunk(512, 0.0f, 1.0f);
-    const auto c2 = rampChunk(512, 512.0f, 1.0f);
+    const auto c2 = rampChunk(513, 512.0f, 1.0f);
     assert(bus.push(c1.data(), 512, 48000.0, 48000.0));
-    assert(bus.push(c2.data(), 512, 48000.0, 48000.0));
+    assert(bus.push(c2.data(), 513, 48000.0, 48000.0));
 
     std::vector<float> dl(512), dr(512);
     assert(bus.pull(dl.data(), dr.data(), 512) == 512);
@@ -56,9 +57,9 @@ static void testResampleContinuityAcrossPushes()
     // Two chunks big enough that the 2:1 output (~1023 frames) clears the
     // prime gate; the seam sits at output frame ~512.
     const auto c1 = rampChunk(1024, 0.0f, 1.0f);
-    const auto c2 = rampChunk(1536, 1024.0f, 1.0f);
+    const auto c2 = rampChunk(2048, 1024.0f, 1.0f);
     bus.push(c1.data(), 1024, src, dev);
-    bus.push(c2.data(), 1536, src, dev);
+    bus.push(c2.data(), 2048, src, dev);
 
     std::vector<float> dl(768), dr(768);
     assert(bus.pull(dl.data(), dr.data(), 768) == 768);
@@ -91,9 +92,10 @@ static void testUnderflowReprimes()
 {
     RendererBus bus;
     bus.setEnabled(true, 1.0f);
-    const auto chunk = rampChunk(kReserveFrames + 513, 1.0f, 0.0f);
-    bus.push(chunk.data(), kReserveFrames + 513, 48000.0, 48000.0);
+    const auto chunk = rampChunk(1025, 1.0f, 0.0f);
+    bus.push(chunk.data(), 1025, 48000.0, 48000.0);
     std::vector<float> dl(512), dr(512);
+    assert(bus.pull(dl.data(), dr.data(), 512) == 512);
     assert(bus.pull(dl.data(), dr.data(), 512) == 512);
     // Ring now nearly empty → this pull underflows.
     assert(bus.pull(dl.data(), dr.data(), 512) == 0);
@@ -228,7 +230,7 @@ static void testLargeBlocksKeepPartialPrime()
             RendererBus bus;
             bus.setEnabled(true, 1.0f);
             const int chunkSize = (int) std::ceil(rate / 200.0);
-            const int reserve = (int) std::ceil(rate * 0.010);
+            const int reserve = std::max(block, (int) std::ceil(rate * 0.010));
             const auto chunk = rampChunk(chunkSize, 0.25f, 0.0f);
             std::vector<float> l(block), r(block);
             bool started = false;
@@ -258,7 +260,7 @@ static void testStallRecoveryLatencyBound()
         {
             RendererBus bus;
             bus.setEnabled(true, 1.0f);
-            const int reserve = (int) std::ceil(rate * 0.010);
+            const int reserve = std::max(block, (int) std::ceil(rate * 0.010));
             const int backlog = block + reserve * 8;
             const auto chunk = rampChunk(backlog + 1, 0.125f, 0.0f);
             bus.push(chunk.data(), backlog + 1, rate, rate);
@@ -280,6 +282,22 @@ static void testStallRecoveryLatencyBound()
         }
 }
 
+static void testBackToBackLargeCallbacks()
+{
+    RendererBus bus;
+    bus.setEnabled(true, 1.0f);
+    constexpr int block = 2048;
+    const auto backlog = rampChunk(block * 5 + 1, 0.25f, 0.0f);
+    bus.push(backlog.data(), block * 5 + 1, 48000.0, 48000.0);
+    std::vector<float> l(block), r(block);
+    // Clamp a stale backlog, then survive a second callback arriving before
+    // the renderer has delivered another chunk. This happens with large ASIO
+    // buffers even though the long-term producer and consumer rates match.
+    assert(bus.pull(l.data(), r.data(), block) == block);
+    assert(bus.pull(l.data(), r.data(), block) == block);
+    assert(bus.metrics().underflowCount == 0);
+}
+
 int main()
 {
     testEqualRateBitExact();
@@ -294,6 +312,7 @@ int main()
     testFlushSparesPostReEnableAudio();
     testLargeBlocksKeepPartialPrime();
     testStallRecoveryLatencyBound();
+    testBackToBackLargeCallbacks();
     std::puts("renderer_bus: all cases passed");
     return 0;
 }

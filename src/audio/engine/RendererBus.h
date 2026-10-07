@@ -27,8 +27,10 @@ class RendererBus
 {
 public:
     static constexpr int kFrames = 65536;
-    // Keep ~10 ms of scheduling reserve AFTER consuming a complete output
-    // block. Both the prime gate and backlog limit must include that block:
+    // Keep at least 10 ms OR one output block of scheduling reserve AFTER
+    // consuming a complete output block. Large ASIO callbacks may arrive in
+    // pairs around a driver scheduling boundary, so 10 ms alone is insufficient.
+    // Both the prime gate and backlog limit must include the next block:
     // a fixed 512-frame gate can repeatedly underflow on 2048-frame ASIO output.
     // A fixed 4096-frame clamp also left shared output ~75 ms behind after
     // device changes. The reserve scales with the actual output sample rate.
@@ -148,7 +150,9 @@ public:
         }
         uint64_t avail = w - r;
 
-        const uint64_t reserve = (uint64_t) reserveFrames.load(std::memory_order_relaxed);
+        const uint64_t schedulingReserve = (uint64_t) reserveFrames.load(std::memory_order_relaxed);
+        const uint64_t reserve = (uint64_t) numSamples > schedulingReserve
+            ? (uint64_t) numSamples : schedulingReserve;
         const uint64_t primeTarget = (uint64_t) numSamples + reserve;
         const uint64_t maxFill = primeTarget + reserve;
         // Drop a renderer stall's stale backlog to one block + reserve. Only
