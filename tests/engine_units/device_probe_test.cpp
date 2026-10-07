@@ -3,8 +3,10 @@
 #include <stdexcept>
 
 // Probe-only fixture: monitor DSP is never called by this test.
-void SourceChain::prepareMonitorChain(double, int) { throw std::logic_error("unexpected DSP prepare"); }
-void SourceChain::releaseMonitorChain() { throw std::logic_error("unexpected DSP release"); }
+void SignalChain::prepare(double, int) { throw std::logic_error("unexpected DSP prepare"); }
+void SignalChain::releaseResources() { throw std::logic_error("unexpected DSP release"); }
+void NoiseGate::prepare(double, int) { throw std::logic_error("unexpected gate prepare"); }
+void TonePolish::prepare(double) { throw std::logic_error("unexpected tone prepare"); }
 
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
 struct Driver { int instances = 0, creations = 0, duplicates = 0; };

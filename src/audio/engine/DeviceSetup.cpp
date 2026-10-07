@@ -167,15 +167,17 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             auto* liveDevice = inMgr.getCurrentAudioDevice();
             auto* liveType = inMgr.getCurrentDeviceTypeObject();
             const auto liveSetup = inMgr.getAudioDeviceSetup();
-            const bool requestedEndpointIsLive =
+            bool requestedEndpointIsLive =
                 liveDevice != nullptr
                 && liveType != nullptr
                 && liveType->getTypeName() == options.inputType
-                && ((liveSetup.inputDeviceName == probeInputName
-                     && liveSetup.outputDeviceName == probeOutputName)
-                    || (options.inputType == "ASIO"
-                        && liveDevice->getName() == probeInputName
-                        && probeInputName == probeOutputName));
+                && liveSetup.inputDeviceName == probeInputName
+                && liveSetup.outputDeviceName == probeOutputName;
+            if (options.inputType == "ASIO" && probeInputName == probeOutputName)
+            {
+                liveDevice = findExistingDevice(inputType, probeInputName, true);
+                requestedEndpointIsLive = liveDevice != nullptr;
+            }
 
             if (requestedEndpointIsLive)
             {

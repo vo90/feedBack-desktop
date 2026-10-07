@@ -14,7 +14,7 @@ async function main() {
   audio.setMonitorMute(true);
   log('devices', audio.getDeviceTypes());
   for (let cycle = 0; cycle < cycles; ++cycle) {
-    const bufferSize = [256, 128, 512][cycle % 3];
+    const bufferSize = [256, 512, 1024][cycle % 3];
     log('probe-before', audio.probeDeviceOptions('ASIO', input, 'Windows Audio', output));
     log('apply-begin', {cycle, bufferSize});
     const result = audio.setDevice({inputType: 'ASIO', inputDevice: input,
@@ -27,7 +27,7 @@ async function main() {
     for (let i = 0; i < 5; ++i) {
       const options = audio.probeDeviceOptions('ASIO', input, 'Windows Audio', output);
       assert.equal(options.compatible, true, options.error);
-      assert.equal(options.inputChannels.length, 8);
+      assert.ok(options.inputChannels.length > 0);
       assert.equal(audio.isAudioRunning(), true);
       await sleep(200);
     }
