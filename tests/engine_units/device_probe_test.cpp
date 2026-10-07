@@ -110,6 +110,17 @@ int main()
                 "closed device capability reuse");
         require(asio.duplicates == 0 && asio.creations == creations, "probe instantiated owned ASIO driver");
         input.closeAudioDevice(); output.closeAudioDevice();
+        input.setCurrentAudioDeviceType("Windows Audio", true);
+        output.setCurrentAudioDeviceType("ASIO", true);
+        require(setup.probeDual("Windows Audio", "Test speakers", "ASIO", "Test interface").compatible,
+                "reverse split probe");
+        require(setup.probeDual("ASIO", "Test interface", "ASIO", "Test interface").compatible,
+                "duplex probe must reuse ASIO owned by output manager");
+        require(asio.duplicates == 0, "reverse probe instantiated owned ASIO driver");
+        require(setup.closeAsioDevicesForReconfigure().isEmpty(), "ASIO release failed");
+        require(asio.instances == 0 && windows.instances == 1,
+                "reconfigure must release ASIO and retain unrelated Windows device");
+        input.closeAudioDevice(); output.closeAudioDevice();
         require(setup.probeDual("ASIO", "Test interface", "Windows Audio", "Test speakers").compatible,
                 "idle temporary probes");
         require(asio.instances == 0 && windows.instances == 0, "temporary probe leaked driver");

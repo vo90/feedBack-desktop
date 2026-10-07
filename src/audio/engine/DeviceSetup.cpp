@@ -11,6 +11,23 @@
 
 namespace slopsmith {
 
+juce::String DeviceSetup::closeAsioDevicesForReconfigure()
+{
+    for (auto* manager : { &inMgr, &outMgr })
+    {
+        auto* type = manager->getCurrentDeviceTypeObject();
+        if (type != nullptr && type->getTypeName() == "ASIO"
+            && manager->getCurrentAudioDevice() != nullptr)
+        {
+            fprintf(stderr, "[AudioEngine] Reconfigure phase=close ASIO begin\n");
+            try { manager->closeAudioDevice(); }
+            catch (...) { return "ASIO close before reconfigure failed"; }
+            fprintf(stderr, "[AudioEngine] Reconfigure phase=close ASIO complete\n");
+        }
+    }
+    return {};
+}
+
 juce::AudioIODevice* DeviceSetup::findExistingDevice(juce::AudioIODeviceType* type,
                                                      const juce::String& name,
                                                      bool isInput)
@@ -602,6 +619,14 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
         return res;
     }
 
+    // Release an input ASIO device auto-opened by the input backend switch
+    // before selecting the output backend, which may auto-open ASIO too.
+    if (auto error = closeAsioDevicesForReconfigure(); error.isNotEmpty())
+    {
+        res.error = error;
+        return res;
+    }
+
     // setCurrentAudioDeviceType can throw from JUCE backends (ASIO).
     // Catch so the failure surfaces as a structured error rather than an
     // exception crossing the N-API boundary.
@@ -639,17 +664,10 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
     // Detaching callbacks in stopAudio does not release that driver instance.
     // Close it BEFORE rate/channel probes and before changing its buffer size,
     // just as applyDuplex does. Probe constructors themselves start ASIO.
-    for (auto* manager : { &inMgr, &outMgr })
+    if (auto error = closeAsioDevicesForReconfigure(); error.isNotEmpty())
     {
-        auto* type = manager->getCurrentDeviceTypeObject();
-        if (type != nullptr && type->getTypeName() == "ASIO"
-            && manager->getCurrentAudioDevice() != nullptr)
-        {
-            fprintf(stderr, "[AudioEngine] Split reconfigure phase=close ASIO begin\n");
-            try { manager->closeAudioDevice(); }
-            catch (...) { res.error = "ASIO close before split reconfigure failed"; return res; }
-            fprintf(stderr, "[AudioEngine] Split reconfigure phase=close ASIO complete\n");
-        }
+        res.error = error;
+        return res;
     }
     if (!rateSupportedBy(inputType, config.inputDevice, true, config.sampleRate)
      || !rateSupportedBy(outputType, config.outputDevice, false, config.sampleRate))

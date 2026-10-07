@@ -451,6 +451,14 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // second interface survive a device/sample-rate/buffer change automatically).
     stopAudio();
 
+    // Switching roles (e.g. ASIO output -> ASIO input) must release the old
+    // owner's driver before setCurrentAudioDeviceType auto-opens a new one.
+    if (auto error = deviceSetup.closeAsioDevicesForReconfigure(); error.isNotEmpty())
+    {
+        res.error = error;
+        return res;
+    }
+
     // setCurrentAudioDeviceType can throw from inside JUCE backends (ASIO
     // is the usual culprit). Catch and propagate as a structured error so
     // the N-API caller doesn't see the exception cross the boundary.

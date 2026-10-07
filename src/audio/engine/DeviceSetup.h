@@ -78,6 +78,10 @@ public:
                             const juce::String& outputTypeName,
                             const juce::String& outputName);
 
+    // Call with audio callbacks detached, before changing either backend or
+    // constructing reconfiguration probes. Backend selection can auto-open.
+    juce::String closeAsioDevicesForReconfigure();
+
     // Open the combined (single-clock) duplex device on the input manager.
     // Empty error string = success; on success stores the achieved format
     // into EngineState and prepares `monitorChain`.
