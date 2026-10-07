@@ -13,7 +13,7 @@
 #include <vector>
 
 using slopsmith::RendererBus;
-static constexpr int kReserveFrames = 480; // 10 ms at the 48 kHz test rate
+static constexpr int kReserveFrames = 960; // 20 ms at the 48 kHz test rate
 
 static std::vector<float> rampChunk(int frames, float start, float step)
 {
@@ -33,9 +33,9 @@ static void testEqualRateBitExact()
     RendererBus bus;
     bus.setEnabled(true, 1.0f);
     const auto c1 = rampChunk(512, 0.0f, 1.0f);
-    const auto c2 = rampChunk(513, 512.0f, 1.0f);
+    const auto c2 = rampChunk(1025, 512.0f, 1.0f);
     assert(bus.push(c1.data(), 512, 48000.0, 48000.0));
-    assert(bus.push(c2.data(), 513, 48000.0, 48000.0));
+    assert(bus.push(c2.data(), 1025, 48000.0, 48000.0));
 
     std::vector<float> dl(512), dr(512);
     assert(bus.pull(dl.data(), dr.data(), 512) == 512);
@@ -54,12 +54,12 @@ static void testResampleContinuityAcrossPushes()
     RendererBus bus;
     bus.setEnabled(true, 1.0f);
     const double src = 96000.0, dev = 48000.0;
-    // Two chunks big enough that the 2:1 output (~1023 frames) clears the
+    // Two chunks big enough that the 2:1 output (~1792 frames) clears the
     // prime gate; the seam sits at output frame ~512.
     const auto c1 = rampChunk(1024, 0.0f, 1.0f);
-    const auto c2 = rampChunk(2048, 1024.0f, 1.0f);
+    const auto c2 = rampChunk(2560, 1024.0f, 1.0f);
     bus.push(c1.data(), 1024, src, dev);
-    bus.push(c2.data(), 2048, src, dev);
+    bus.push(c2.data(), 2560, src, dev);
 
     std::vector<float> dl(768), dr(768);
     assert(bus.pull(dl.data(), dr.data(), 768) == 768);
@@ -72,7 +72,7 @@ static void testResampleContinuityAcrossPushes()
     }
 }
 
-// Prime gate: nothing comes out until ~kPrimeFrames are buffered.
+// Prime gate: nothing comes out until a complete block and reserve are buffered.
 static void testPrimeGate()
 {
     RendererBus bus;
@@ -92,8 +92,8 @@ static void testUnderflowReprimes()
 {
     RendererBus bus;
     bus.setEnabled(true, 1.0f);
-    const auto chunk = rampChunk(1025, 1.0f, 0.0f);
-    bus.push(chunk.data(), 1025, 48000.0, 48000.0);
+    const auto chunk = rampChunk(1473, 1.0f, 0.0f);
+    bus.push(chunk.data(), 1473, 48000.0, 48000.0);
     std::vector<float> dl(512), dr(512);
     assert(bus.pull(dl.data(), dr.data(), 512) == 512);
     assert(bus.pull(dl.data(), dr.data(), 512) == 512);
@@ -230,7 +230,7 @@ static void testLargeBlocksKeepPartialPrime()
             RendererBus bus;
             bus.setEnabled(true, 1.0f);
             const int chunkSize = (int) std::ceil(rate / 200.0);
-            const int reserve = std::max(block, (int) std::ceil(rate * 0.010));
+            const int reserve = std::max(block, (int) std::ceil(rate * 0.020));
             const auto chunk = rampChunk(chunkSize, 0.25f, 0.0f);
             std::vector<float> l(block), r(block);
             bool started = false;
@@ -260,7 +260,7 @@ static void testStallRecoveryLatencyBound()
         {
             RendererBus bus;
             bus.setEnabled(true, 1.0f);
-            const int reserve = std::max(block, (int) std::ceil(rate * 0.010));
+            const int reserve = std::max(block, (int) std::ceil(rate * 0.020));
             const int backlog = block + reserve * 8;
             const auto chunk = rampChunk(backlog + 1, 0.125f, 0.0f);
             bus.push(chunk.data(), backlog + 1, rate, rate);
@@ -298,6 +298,27 @@ static void testBackToBackLargeCallbacks()
     assert(bus.metrics().underflowCount == 0);
 }
 
+static void testSmallBlocksSurviveDeliveryJitter()
+{
+    RendererBus bus;
+    bus.setEnabled(true, 1.0f);
+    constexpr int block = 480;
+    const auto initial = rampChunk(block * 3 + 1, 0.25f, 0.0f);
+    const auto burst = rampChunk(block * 3, 0.25f, 0.0f);
+    std::vector<float> l(block), r(block);
+    bus.push(initial.data(), block * 3 + 1, 48000.0, 48000.0);
+    for (int round = 0; round < 100; ++round)
+    {
+        // Three 10 ms output callbacks can run before the IPC producer gets
+        // its next turn. Keep every frame and tolerate this phase variation.
+        for (int i = 0; i < 3; ++i)
+            assert(bus.pull(l.data(), r.data(), block) == block);
+        bus.push(burst.data(), block * 3, 48000.0, 48000.0);
+    }
+    assert(bus.metrics().underflowCount == 0);
+    assert(bus.metrics().overflowCount == 0);
+}
+
 int main()
 {
     testEqualRateBitExact();
@@ -313,6 +334,7 @@ int main()
     testLargeBlocksKeepPartialPrime();
     testStallRecoveryLatencyBound();
     testBackToBackLargeCallbacks();
+    testSmallBlocksSurviveDeliveryJitter();
     std::puts("renderer_bus: all cases passed");
     return 0;
 }

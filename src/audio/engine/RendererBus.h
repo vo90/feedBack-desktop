@@ -3,8 +3,7 @@
 // RendererBus — the WebAudio→engine audio bus (TLC plan phase 2 / §2.6).
 // Moved verbatim from AudioEngine (see git history for the original inline
 // comments' evolution): the renderer pushes its WebAudio master mix here over
-// IPC so song/stem audio stays audible when the output device is
-// exclusive-style (ASIO / WASAPI exclusive) and the OS mixer path is silent.
+// IPC so song/stem audio follows the selected native output on every backend.
 //
 // SPSC: producer is the main-process IPC thread (push — includes the linear
 // resampler), consumer is whichever output callback is live (pull). Sized
@@ -27,9 +26,11 @@ class RendererBus
 {
 public:
     static constexpr int kFrames = 65536;
-    // Keep at least 10 ms OR one output block of scheduling reserve AFTER
+    // Keep at least 20 ms OR one output block of scheduling reserve AFTER
     // consuming a complete output block. Large ASIO callbacks may arrive in
-    // pairs around a driver scheduling boundary, so 10 ms alone is insufficient.
+    // pairs around a driver scheduling boundary. Small blocks also need enough
+    // reserve for frame-capture/renderer/IPC scheduling jitter (10 ms starved
+    // periodically on shared Windows output even with 10 ms device callbacks).
     // Both the prime gate and backlog limit must include the next block:
     // a fixed 512-frame gate can repeatedly underflow on 2048-frame ASIO output.
     // A fixed 4096-frame clamp also left shared output ~75 ms behind after
@@ -90,7 +91,7 @@ public:
         const double step = sourceRate / deviceRate;
         if (!std::isfinite(step) || step <= 0.0) return false;
         reserveFrames.store((int) std::fmin(kFrames / 4,
-            std::fmax(1.0, std::ceil(deviceRate * 0.010))), std::memory_order_relaxed);
+            std::fmax(1.0, std::ceil(deviceRate * 0.020))), std::memory_order_relaxed);
         double pos = srcPos;
         uint64_t written = 0;
         while (true)
@@ -166,7 +167,7 @@ public:
 
         // Prefill gate (spike finding): the warmup underflow burst is the mix
         // starting before the ring has a cushion. Consume nothing until the
-        // producer has built ~10 ms; re-arm the same gate after a real
+        // producer has built a full block plus reserve; re-arm after a real
         // underflow so stall recovery is one clean gap, not a ragged refill.
         if (!primed)
         {
@@ -230,7 +231,7 @@ private:
     std::atomic<uint64_t> overflowCount{0};
     std::atomic<bool>  busEnabled{false};
     std::atomic<float> busGain{1.0f};
-    std::atomic<int> reserveFrames{480};
+    std::atomic<int> reserveFrames{960};
     // Consumer-side prefill-gate state. Only the live output callback touches
     // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
     std::atomic<bool> primed{false};
