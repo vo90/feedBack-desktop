@@ -356,29 +356,27 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
                 options.compatible = false;
             }
 
-            // Split mode opens both sides with the same bufferSize, so the
-            // UI should only see sizes the intersection of both devices
-            // supports — a union would let the user pick a value that
-            // predictably fails at apply time on one side.
+            // ASIO must honor the selected buffer exactly. Other backends
+            // negotiate their own size; the split ring already bridges unequal
+            // callback blocks (e.g. ASIO 256 -> WASAPI 480). Requiring a common
+            // advertised size incorrectly rejects WASAPI low-latency mode.
             const auto inBufs = inDev->getAvailableBufferSizes();
             const auto outBufs = outDev->getAvailableBufferSizes();
-            for (auto b : inBufs)
+            const bool inputAsio = options.inputType == "ASIO";
+            const bool outputAsio = options.outputType == "ASIO";
+            const auto& requestedBuffers = outputAsio && !inputAsio ? outBufs : inBufs;
+            if (!inBufs.isEmpty() && !outBufs.isEmpty())
             {
-                for (auto b2 : outBufs)
+                for (auto b : requestedBuffers)
                 {
-                    if (b == b2 && b > 0 && b <= kOutputRingFrames)
-                    {
+                    if (b > 0 && b <= kOutputRingFrames
+                        && (!(inputAsio && outputAsio) || outBufs.contains(b)))
                         options.bufferSizes.addIfNotAlreadyThere(b);
-                        break;
-                    }
                 }
             }
-            // An empty intersection means there's no buffer size both sides
-            // accept; setting compatible=false stops the UI from re-enabling
-            // Apply against a guaranteed-fail config.
             if (options.bufferSizes.isEmpty() && options.error.isEmpty())
             {
-                options.error = "Input and output devices share no common buffer size";
+                options.error = "No supported split-mode buffer size for these devices";
                 options.compatible = false;
             }
         }
@@ -830,6 +828,7 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
     const int    inBs = inDev->getCurrentBufferSizeSamples();
 
     if (!inDev->isOpen() || !ratesMatch(inSr, config.sampleRate)
+        || inBs <= 0 || inBs > kOutputRingFrames
         || (config.inputType == "ASIO" && inBs != config.bufferSize)
         || inDev->getActiveInputChannels() != inSetup.inputChannels)
     {
@@ -892,7 +891,8 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
     const double outSr = outDev->getCurrentSampleRate();
     const int    outBs = outDev->getCurrentBufferSizeSamples();
 
-    if (!outDev->isOpen() || (config.outputType == "ASIO" && outBs != config.bufferSize)
+    if (!outDev->isOpen() || outBs <= 0 || outBs > kOutputRingFrames
+        || (config.outputType == "ASIO" && outBs != config.bufferSize)
         || outDev->getActiveOutputChannels() != outSetup.outputChannels)
     {
         res.error = "Output device did not open with the requested format/channels";

@@ -24,7 +24,8 @@ public:
     { return driver.inputAvailable ? juce::StringArray {"1", "2", "3", "4", "5", "6", "7", "8"} : juce::StringArray(); }
     juce::StringArray getOutputChannelNames() override { return {"L", "R"}; }
     juce::Array<double> getAvailableSampleRates() override { return {48000}; }
-    juce::Array<int> getAvailableBufferSizes() override { return {128, 256, 512}; }
+    juce::Array<int> getAvailableBufferSizes() override
+    { return getTypeName() == "ASIO" ? juce::Array<int> {128, 256, 512} : juce::Array<int> {480}; }
     int getDefaultBufferSize() override { return 256; }
     juce::String open(const juce::BigInteger& i, const juce::BigInteger& o, double sr, int bs) override
     { inputs = i; outputs = o; rate = sr; block = bs; opened = true; return {}; }
@@ -117,6 +118,8 @@ int main()
         {
             const auto split = setup.probeDual("ASIO", "Test interface", "Windows Audio", "Test speakers");
             require(split.compatible && split.inputChannels.size() == 8, "split capabilities");
+            require(split.bufferSizes.contains(256) && !split.bufferSizes.contains(480),
+                    "ASIO input buffer choices must allow independently negotiated Windows output size");
             const auto duplex = setup.probeDual("ASIO", "Test interface", "ASIO", "Test interface");
             require(duplex.compatible && duplex.inputChannels.size() == 8, "split to duplex probe");
             require(setup.probeDual("ASIO", "Test interface", "ASIO", "").compatible,
@@ -134,6 +137,8 @@ int main()
         output.setCurrentAudioDeviceType("ASIO", true);
         require(setup.probeDual("Windows Audio", "Test speakers", "ASIO", "Test interface").compatible,
                 "reverse split probe");
+        require(setup.probeDual("Windows Audio", "Test speakers", "ASIO", "Test interface").bufferSizes.contains(256),
+                "ASIO output determines requested buffer when Windows input negotiates independently");
         require(setup.probeDual("ASIO", "Test interface", "ASIO", "Test interface").compatible,
                 "duplex probe must reuse ASIO owned by output manager");
         require(asio.duplicates == 0, "reverse probe instantiated owned ASIO driver");
