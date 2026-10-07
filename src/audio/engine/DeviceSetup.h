@@ -116,6 +116,11 @@ public:
                                 bool isInput, double sr);
 
 private:
+    // Device operations are serialized on the JUCE message thread. Even a
+    // closed ASIO object owns its driver, so reuse it for capability queries.
+    juce::AudioIODevice* findExistingDevice(juce::AudioIODeviceType* type,
+                                            const juce::String& name,
+                                            bool isInput);
     juce::AudioDeviceManager& inMgr;
     juce::AudioDeviceManager& outMgr;
     EngineState& state;

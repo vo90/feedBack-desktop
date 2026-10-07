@@ -32,6 +32,14 @@ add_test(NAME backing_clock_snapshot COMMAND backing_clock_snapshot_test)
 
 # Available in the full addon build; the standalone pure-helper harness has no JUCE.
 if(TARGET juce::juce_audio_formats)
+    add_executable(device_probe_test device_probe_test.cpp
+        ../../src/audio/engine/DeviceSetup.cpp)
+    target_compile_features(device_probe_test PRIVATE cxx_std_20)
+    target_compile_definitions(device_probe_test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 SLOPSMITH_NAM_SUPPORT=0 SLOPSMITH_ONNX_SUPPORT=0)
+    target_link_libraries(device_probe_test PRIVATE juce::juce_audio_utils juce::juce_dsp)
+    add_test(NAME device_probe COMMAND device_probe_test)
+
     add_executable(backing_player_clock_test backing_player_clock_test.cpp
         ../../src/audio/engine/BackingPlayer.cpp)
     target_compile_features(backing_player_clock_test PRIVATE cxx_std_20)

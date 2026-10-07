@@ -11,6 +11,27 @@
 
 namespace slopsmith {
 
+juce::AudioIODevice* DeviceSetup::findExistingDevice(juce::AudioIODeviceType* type,
+                                                     const juce::String& name,
+                                                     bool isInput)
+{
+    for (auto* manager : { &inMgr, &outMgr })
+    {
+        auto* device = manager->getCurrentAudioDevice();
+        auto* existingType = manager->getCurrentDeviceTypeObject();
+        if (device == nullptr || existingType == nullptr
+            || existingType->getTypeName() != type->getTypeName())
+            continue;
+        const auto setup = manager->getAudioDeviceSetup();
+        // ASIO names identify the whole interface regardless of which side
+        // was opened. WASAPI names identify separate input/output endpoints.
+        if ((isInput ? setup.inputDeviceName : setup.outputDeviceName) == name
+            || (type->getTypeName() == "ASIO" && device->getName() == name))
+            return device;
+    }
+    return nullptr;
+}
+
 juce::String DeviceSetup::resolveDeviceName(juce::AudioIODeviceType* t,
                                             bool isInput, const juce::String& name)
 {
@@ -148,11 +169,13 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             const auto liveSetup = inMgr.getAudioDeviceSetup();
             const bool requestedEndpointIsLive =
                 liveDevice != nullptr
-                && liveDevice->isOpen()
                 && liveType != nullptr
                 && liveType->getTypeName() == options.inputType
-                && liveSetup.inputDeviceName == probeInputName
-                && liveSetup.outputDeviceName == probeOutputName;
+                && ((liveSetup.inputDeviceName == probeInputName
+                     && liveSetup.outputDeviceName == probeOutputName)
+                    || (options.inputType == "ASIO"
+                        && liveDevice->getName() == probeInputName
+                        && probeInputName == probeOutputName));
 
             if (requestedEndpointIsLive)
             {
@@ -192,10 +215,21 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
         }
         if (!isDuplex)
         {
-            std::unique_ptr<juce::AudioIODevice> inDev(
-                inputType->createDevice({}, probeInputName));
-            std::unique_ptr<juce::AudioIODevice> outDev(
-                outputType->createDevice(probeOutputName, {}));
+            // Constructing an ASIO probe initializes and briefly starts its
+            // driver. Never create a second object for an owned endpoint.
+            std::unique_ptr<juce::AudioIODevice> inputProbe, outputProbe;
+            auto* inDev = findExistingDevice(inputType, probeInputName, true);
+            if (inDev == nullptr)
+            {
+                inputProbe.reset(inputType->createDevice({}, probeInputName));
+                inDev = inputProbe.get();
+            }
+            auto* outDev = findExistingDevice(outputType, probeOutputName, false);
+            if (outDev == nullptr)
+            {
+                outputProbe.reset(outputType->createDevice(probeOutputName, {}));
+                outDev = outputProbe.get();
+            }
             if (!inDev || !outDev)
             {
                 options.error = "Could not create dual probe devices";
@@ -598,6 +632,23 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
         res.error = "Device type not found";
         return res;
     }
+
+    // setCurrentAudioDeviceType may already have opened an ASIO endpoint.
+    // Detaching callbacks in stopAudio does not release that driver instance.
+    // Close it BEFORE rate/channel probes and before changing its buffer size,
+    // just as applyDuplex does. Probe constructors themselves start ASIO.
+    for (auto* manager : { &inMgr, &outMgr })
+    {
+        auto* type = manager->getCurrentDeviceTypeObject();
+        if (type != nullptr && type->getTypeName() == "ASIO"
+            && manager->getCurrentAudioDevice() != nullptr)
+        {
+            fprintf(stderr, "[AudioEngine] Split reconfigure phase=close ASIO begin\n");
+            try { manager->closeAudioDevice(); }
+            catch (...) { res.error = "ASIO close before split reconfigure failed"; return res; }
+            fprintf(stderr, "[AudioEngine] Split reconfigure phase=close ASIO complete\n");
+        }
+    }
     if (!rateSupportedBy(inputType, config.inputDevice, true, config.sampleRate)
      || !rateSupportedBy(outputType, config.outputDevice, false, config.sampleRate))
     {
@@ -651,6 +702,10 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
         }
         try { inMgr.closeAudioDevice(); } catch (...) {}
         try { outMgr.closeAudioDevice(); } catch (...) {}
+        state.currentSampleRate.store(0.0, std::memory_order_relaxed);
+        state.inputBlockSize.store(0, std::memory_order_relaxed);
+        state.outputBlockSize.store(0, std::memory_order_relaxed);
+        state.duplexMode.store(false, std::memory_order_relaxed);
     };
 
     // Mirror applyDuplex's JUCE_LINUX close-before-reconfigure pattern:
@@ -677,14 +732,27 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
 #endif
 
     juce::String inErr;
+    fprintf(stderr, "[AudioEngine] Split reconfigure phase=input-open begin sr=%.0f bs=%d\n",
+            config.sampleRate, config.bufferSize);
     try { inErr = inMgr.setAudioDeviceSetup(inSetup, true); }
     catch (...) { res.error = "input setAudioDeviceSetup threw"; rollbackOpenedDevices(); return res; }
+    fprintf(stderr, "[AudioEngine] Split reconfigure phase=input-open complete error='%s'\n", inErr.toRawUTF8());
     if (inErr.isNotEmpty()) { res.error = "input setup: " + inErr; rollbackOpenedDevices(); return res; }
 
     auto* inDev = inMgr.getCurrentAudioDevice();
     if (!inDev) { res.error = "no input device after setup"; rollbackOpenedDevices(); return res; }
     const double inSr = inDev->getCurrentSampleRate();
     const int    inBs = inDev->getCurrentBufferSizeSamples();
+
+    if (!inDev->isOpen() || !ratesMatch(inSr, config.sampleRate)
+        || (config.inputType == "ASIO" && inBs != config.bufferSize)
+        || inDev->getActiveInputChannels() != inSetup.inputChannels)
+    {
+        res.error = "Input device did not open with the requested format/channels (actual "
+                  + juce::String(inSr) + " Hz, " + juce::String(inBs) + " samples)";
+        rollbackOpenedDevices();
+        return res;
+    }
 
     // Same first-enumerated resolution on the output side — see input note
     // above for why this matches the probe + SR preflight strategy.
@@ -738,6 +806,14 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
     if (!outDev) { res.error = "no output device after setup"; rollbackOpenedDevices(); return res; }
     const double outSr = outDev->getCurrentSampleRate();
     const int    outBs = outDev->getCurrentBufferSizeSamples();
+
+    if (!outDev->isOpen() || (config.outputType == "ASIO" && outBs != config.bufferSize)
+        || outDev->getActiveOutputChannels() != outSetup.outputChannels)
+    {
+        res.error = "Output device did not open with the requested format/channels";
+        rollbackOpenedDevices();
+        return res;
+    }
 
     if (!ratesMatch(inSr, outSr))
     {
