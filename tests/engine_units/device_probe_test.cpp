@@ -51,11 +51,12 @@ private:
 class Type final : public juce::AudioIODeviceType
 {
 public:
-    Type(Driver& d, const juce::String& type, const juce::String& device)
-        : AudioIODeviceType(type), driver(d), name(device) {}
+    Type(Driver& d, const juce::String& type, const juce::String& device, int defaultIndex = 0)
+        : AudioIODeviceType(type), driver(d), name(device), defaultDeviceIndex(defaultIndex) {}
     void scanForDevices() override {}
-    juce::StringArray getDeviceNames(bool) const override { return {name}; }
-    int getDefaultDeviceIndex(bool) const override { return 0; }
+    juce::StringArray getDeviceNames(bool) const override
+    { return defaultDeviceIndex == 1 ? juce::StringArray {"Other interface", name} : juce::StringArray {name}; }
+    int getDefaultDeviceIndex(bool) const override { return defaultDeviceIndex; }
     int getIndexOfDevice(juce::AudioIODevice*, bool) const override { return 0; }
     bool hasSeparateInputsAndOutputs() const override { return false; }
     juce::AudioIODevice* createDevice(const juce::String& output, const juce::String& input) override
@@ -63,6 +64,7 @@ public:
 private:
     Driver& driver;
     juce::String name;
+    int defaultDeviceIndex;
 };
 class Manager final : public juce::AudioDeviceManager
 {
@@ -96,6 +98,15 @@ int main()
         require(output.setAudioDeviceSetup(out, true).isEmpty(), "output open");
         slopsmith::EngineState state;
         slopsmith::DeviceSetup setup(input, output, state);
+        Type nonFirstDefault(asio, "ASIO", "Test interface", 1);
+        require(slopsmith::DeviceSetup::resolveDeviceName(&nonFirstDefault, true, {}) == "Test interface",
+                "Default must use the backend index, not the first enumerated device");
+        require(slopsmith::DeviceSetup::resolveDeviceName(&nonFirstDefault, false, "Other interface") == "Other interface",
+                "explicit selection must be preserved");
+        Manager additional(asio, windows);
+        setup.registerAdditionalManager(additional);
+        require(setup.validateAdditionalOpen(additional, "ASIO", "").isNotEmpty(),
+                "extra output Default must not reopen primary ASIO");
         const int creations = asio.creations;
         for (int i = 0; i < 10; ++i)
         {
@@ -103,6 +114,10 @@ int main()
             require(split.compatible && split.inputChannels.size() == 8, "split capabilities");
             const auto duplex = setup.probeDual("ASIO", "Test interface", "ASIO", "Test interface");
             require(duplex.compatible && duplex.inputChannels.size() == 8, "split to duplex probe");
+            require(setup.probeDual("ASIO", "Test interface", "ASIO", "").compatible,
+                    "named input and default output must share one ASIO object");
+            require(setup.probeDual("ASIO", "", "ASIO", "Test interface").compatible,
+                    "default input and named output must share one ASIO object");
         }
         // A stopped/closed object still owns the driver until destruction.
         input.getCurrentAudioDevice()->close();
@@ -121,6 +136,23 @@ int main()
         require(asio.instances == 0 && windows.instances == 1,
                 "reconfigure must release ASIO and retain unrelated Windows device");
         input.closeAudioDevice(); output.closeAudioDevice();
+        const int beforeDefaultProbes = asio.creations;
+        for (const auto& inputName : { juce::String(), juce::String("Test interface") })
+            for (const auto& outputName : { juce::String(), juce::String("Test interface") })
+            {
+                require(setup.probeDual("ASIO", inputName, "ASIO", outputName).compatible,
+                        "cold default/named duplex probe");
+                slopsmith::DeviceConfig config { "ASIO", inputName, "ASIO", outputName };
+                require(setup.resolveConfigDeviceNames(config).isEmpty(), "resolve default names");
+                require(config.inputDevice == "Test interface" && config.outputDevice == config.inputDevice,
+                        "apply and probe must resolve the same endpoint");
+            }
+        require(asio.creations == beforeDefaultProbes + 4 && asio.duplicates == 0,
+                "each cold duplex probe must construct exactly one driver");
+        slopsmith::DeviceConfig missing { "ASIO", "Disconnected interface", "Windows Audio", "" };
+        require(setup.resolveConfigDeviceNames(missing).isNotEmpty(), "reject unavailable device before mutation");
+        require(!setup.probeDual("ASIO", "Disconnected interface", "ASIO", "").compatible,
+                "unavailable probe fails closed");
         require(setup.probeDual("ASIO", "Test interface", "Windows Audio", "Test speakers").compatible,
                 "idle temporary probes");
         require(asio.instances == 0 && windows.instances == 0, "temporary probe leaked driver");

@@ -32,7 +32,9 @@ juce::AudioIODevice* DeviceSetup::findExistingDevice(juce::AudioIODeviceType* ty
                                                      const juce::String& name,
                                                      bool isInput)
 {
-    for (auto* manager : { &inMgr, &outMgr })
+    auto managers = otherManagers;
+    managers.add(&inMgr); managers.add(&outMgr);
+    for (auto* manager : managers)
     {
         auto* device = manager->getCurrentAudioDevice();
         auto* existingType = manager->getCurrentDeviceTypeObject();
@@ -49,22 +51,63 @@ juce::AudioIODevice* DeviceSetup::findExistingDevice(juce::AudioIODeviceType* ty
     return nullptr;
 }
 
+juce::String DeviceSetup::validateAdditionalOpen(juce::AudioDeviceManager& manager,
+                                                const juce::String& typeName, const juce::String& name)
+{
+    if (typeName != "ASIO") return {};
+    juce::AudioIODeviceType* type = nullptr;
+    for (auto* candidate : manager.getAvailableDeviceTypes())
+        if (candidate->getTypeName() == typeName) { type = candidate; break; }
+    if (type == nullptr) return "ASIO backend unavailable";
+    type->scanForDevices();
+    auto names = juce::StringArray { resolveDeviceName(type, false, name) };
+    // Switching backend can auto-open its default before the requested name.
+    auto* currentType = manager.getCurrentDeviceTypeObject();
+    if (currentType == nullptr || currentType->getTypeName() != typeName)
+        names.addIfNotAlreadyThere(resolveDeviceName(type, false, {}));
+    for (const auto& endpoint : names)
+        if (auto* owned = findExistingDevice(type, endpoint, true))
+            if (owned != manager.getCurrentAudioDevice())
+                return "ASIO device is already in use by another audio path: " + endpoint;
+    return {};
+}
+
 juce::String DeviceSetup::resolveDeviceName(juce::AudioIODeviceType* t,
                                             bool isInput, const juce::String& name)
 {
     if (t == nullptr || name.isNotEmpty()) return name;
     auto names = t->getDeviceNames(isInput);
-    return names.size() > 0 ? names[0] : name;
+    const int index = t->getDefaultDeviceIndex(isInput);
+    return juce::isPositiveAndBelow(index, names.size()) ? names[index] : juce::String();
+}
+
+juce::String DeviceSetup::resolveConfigDeviceNames(DeviceConfig& config)
+{
+    auto resolve = [](juce::AudioDeviceManager& manager, const juce::String& typeName,
+                      juce::String& name, bool input) -> juce::String {
+        for (auto* type : manager.getAvailableDeviceTypes())
+        {
+            if (type->getTypeName() != typeName) continue;
+            name = resolveDeviceName(type, input, name);
+            if (name.isEmpty() || !type->getDeviceNames(input).contains(name))
+                return input ? "Input device unavailable" : "Output device unavailable";
+            return {};
+        }
+        return input ? "Input device type not found" : "Output device type not found";
+    };
+    if (auto error = resolve(inMgr, config.inputType, config.inputDevice, true); error.isNotEmpty())
+        return error;
+    return resolve(outMgr, config.outputType, config.outputDevice, false);
 }
 
 bool DeviceSetup::rateSupportedBy(juce::AudioIODeviceType* t, const juce::String& dev,
                                   bool isInput, double sr)
 {
     // v1 forces matching nominal SR — no adaptive resampler yet. Resolve empty
-    // name to first-enumerated for the createDevice probe call (matches
+    // name to backend-default for the createDevice probe call (matches
     // probeDual's strategy). createDevice("") is implementation-defined per
     // backend — some return the default, some return null. Using
-    // first-enumerated keeps probe and apply checking the SAME concrete
+    // backend-default keeps probe and apply checking the SAME concrete
     // device, so an empty-name config can't pass the UI probe and then fail
     // this check.
     if (!t) return false;
@@ -148,12 +191,19 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
         options.output = outputName;
 
         // For probing we still need a concrete device to instantiate.
-        // Resolve empty names to first-enumerated ONLY for the probe-device
+        // Resolve empty names to backend-default ONLY for the probe-device
         // creation below — DON'T write back into options.input/options.output;
         // those flow to the UI and the apply path, which treat empty as
         // "OS default" per side.
-        const juce::String probeInputName  = resolveDeviceName(inputType,  true,  options.input);
-        const juce::String probeOutputName = resolveDeviceName(outputType, false, options.output);
+        DeviceConfig resolved { options.inputType, options.input, options.outputType, options.output };
+        if (auto error = resolveConfigDeviceNames(resolved); error.isNotEmpty())
+        {
+            options.error = error;
+            options.compatible = false;
+            return options;
+        }
+        const juce::String& probeInputName = resolved.inputDevice;
+        const juce::String& probeOutputName = resolved.outputDevice;
 
         // Probe the SAME way setAudioDevices() will actually apply, or the
         // startup auto-apply mis-fires: init() fail-closes on this probe's
@@ -165,7 +215,7 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
         // same backend (USB cable in + separate speakers out) are two clocks and
         // go split. Mirror setAudioDevices()'s sameEndpointIntent exactly.
         bool isDuplex = (options.inputType == options.outputType)
-                        && (options.input == options.output);
+                        && (probeInputName == probeOutputName);
 
         if (isDuplex)
         {
@@ -229,7 +279,9 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             }
             else
             {
-                isDuplex = false;
+                options.error = "Could not create duplex probe device";
+                options.compatible = false;
+                return options;
             }
         }
         if (!isDuplex)
@@ -297,7 +349,7 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             {
                 for (auto b2 : outBufs)
                 {
-                    if (b == b2)
+                    if (b == b2 && b > 0 && b <= kOutputRingFrames)
                     {
                         options.bufferSizes.addIfNotAlreadyThere(b);
                         break;
@@ -312,6 +364,13 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
                 options.error = "Input and output devices share no common buffer size";
                 options.compatible = false;
             }
+        }
+
+        if (options.inputChannels.isEmpty() || options.outputChannels.isEmpty()
+            || options.sampleRates.isEmpty() || options.bufferSizes.isEmpty())
+        {
+            options.compatible = false;
+            if (options.error.isEmpty()) options.error = "Device has no usable channels or audio formats";
         }
 
         fprintf(stderr, "[AudioEngine] Probed device options: inType='%s' outType='%s' in='%s' out='%s' "
@@ -677,13 +736,7 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
     }
 
     juce::AudioDeviceManager::AudioDeviceSetup inSetup;
-    // Resolve empty name to first-enumerated input device — matches the
-    // rateSupportedBy preflight above AND probeDual. Using empty +
-    // useDefault*Channels here would make JUCE open the OS default, which can
-    // differ from inputs[0] on platforms where the OS-default differs from
-    // JUCE's enumeration order. The probe + SR preflight + actual open all
-    // need to agree on the same concrete device for the apply path to behave
-    // consistently with what the UI showed the user.
+    // Use the same concrete backend default as capability probing.
     const juce::String resolvedInputName = resolveDeviceName(inputType, true, config.inputDevice);
 
     inSetup.inputDeviceName  = resolvedInputName;
@@ -774,7 +827,7 @@ DeviceConfigResult DeviceSetup::applySplit(const DeviceConfig& config,
         return res;
     }
 
-    // Same first-enumerated resolution on the output side — see input note
+    // Same backend-default resolution on the output side — see input note
     // above for why this matches the probe + SR preflight strategy.
     const juce::String resolvedOutputName = resolveDeviceName(outputType, false, config.outputDevice);
 

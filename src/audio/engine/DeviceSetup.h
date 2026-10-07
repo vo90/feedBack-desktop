@@ -9,7 +9,7 @@
 // as the orchestrator (stop → resolve → duplex-or-split → restart).
 //
 // The rate-tolerance (`<= 0.5`, probe/preflight/verify), midpoint-rounding,
-// and empty-name→first-enumerated resolution logic that used to live in three
+// and empty-name→backend-default resolution logic that used to live in three
 // hand-synced copies is extracted into the shared helpers at the bottom —
 // the deep-read §7 dedupe, landed structurally by this move.
 
@@ -82,6 +82,13 @@ public:
     // constructing reconfiguration probes. Backend selection can auto-open.
     juce::String closeAsioDevicesForReconfigure();
 
+    // Resolve Default to the backend's actual default and reject stale names
+    // before opening any driver. Probe and apply must classify the same pair.
+    juce::String resolveConfigDeviceNames(DeviceConfig& config);
+    void registerAdditionalManager(juce::AudioDeviceManager& manager) { otherManagers.add(&manager); }
+    juce::String validateAdditionalOpen(juce::AudioDeviceManager& manager,
+                                        const juce::String& type, const juce::String& name);
+
     // Open the combined (single-clock) duplex device on the input manager.
     // Empty error string = success; on success stores the achieved format
     // into EngineState and prepares `monitorChain`.
@@ -111,7 +118,7 @@ public:
     // ── Shared helpers (the three previously hand-synced copies) ──────────
     // ratesMatch / nominalRateCandidate live in RateMatch.h (JUCE-free, unit-
     // tested); the device-name resolution helpers below need JUCE types.
-    // Empty device name → first-enumerated for that type/direction (probe,
+    // Empty device name → backend-default for that type/direction (probe,
     // SR preflight, and split open must all check the SAME concrete device).
     static juce::String resolveDeviceName(juce::AudioIODeviceType* t,
                                           bool isInput, const juce::String& name);
@@ -128,6 +135,7 @@ private:
     juce::AudioDeviceManager& inMgr;
     juce::AudioDeviceManager& outMgr;
     EngineState& state;
+    juce::Array<juce::AudioDeviceManager*> otherManagers;
 };
 
 } // namespace slopsmith

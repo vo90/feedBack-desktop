@@ -3,6 +3,7 @@
 // logic is unchanged. See StreamSink.h for the design rationale.
 
 #include "StreamSink.h"
+#include "DeviceSetup.h"
 
 #include <cmath>
 #include <cstdio>
@@ -133,6 +134,10 @@ void StreamSink::deviceStopped()
 
 juce::String StreamSink::open(const juce::String& typeName, const juce::String& deviceName)
 {
+    if (validateOpen)
+        if (auto error = validateOpen(manager, typeName, deviceName); error.isNotEmpty())
+            return error;
+    close();
     // Control-thread only. Opens an OUTPUT-only device on the stream sink's own
     // AudioDeviceManager and attaches the drain callback. Mirrors applySplitSetup's
     // output open. v1 requires the sink's nominal SR to match the engine rate (no
@@ -182,12 +187,10 @@ juce::String StreamSink::open(const juce::String& typeName, const juce::String& 
         else manager.setCurrentAudioDeviceType(typeName, true);
     } catch (...) { return fail("setCurrentAudioDeviceType threw for stream output type '" + typeName + "'"); }
 
-    juce::String resolved = deviceName;
-    if (resolved.isEmpty())
-    {
-        auto names = outType->getDeviceNames(false);
-        if (names.size() > 0) resolved = names[0];
-    }
+    const auto resolved = DeviceSetup::resolveDeviceName(outType, false, deviceName);
+    if (resolved.isEmpty() || !outType->getDeviceNames(false).contains(resolved))
+        return fail("Stream output device unavailable");
+    if (typeName == "ASIO") manager.closeAudioDevice();
 
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     setup.inputDeviceName  = "";

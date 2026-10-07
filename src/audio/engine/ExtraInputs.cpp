@@ -141,7 +141,7 @@ juce::String ExtraInputs::bind(int deviceKey, const juce::String& deviceName)
     // Open `deviceName` input-only on this slot's own manager. initialise first so
     // the manager has a device type, then switch to the requested input device with
     // all its channels (the source picks a channel within).
-    s.manager.initialiseWithDefaultDevices(2, 0);
+    s.manager.initialise(0, 0, nullptr, false);
 
     // The device name may belong to a device TYPE (ALSA / JACK / CoreAudio / …)
     // different from the slot manager's default — a JACK device name won't resolve
@@ -165,6 +165,9 @@ juce::String ExtraInputs::bind(int deviceKey, const juce::String& deviceName)
     // misconfigured JACK/CoreAudio) — setAudioDevices() guards it for the primary, so
     // this path must too, or a bad backend terminates the process instead of
     // returning an error to the renderer. Close the slot manager on failure.
+    if (validateOpen)
+        if (auto error = validateOpen(s.manager, chosenType, deviceName); error.isNotEmpty())
+        { s.manager.closeAudioDevice(); return error; }
     if (chosenType.isNotEmpty())
     {
         try { s.manager.setCurrentAudioDeviceType(chosenType, true); }
@@ -173,6 +176,7 @@ juce::String ExtraInputs::bind(int deviceKey, const juce::String& deviceName)
 
     juce::AudioDeviceManager::AudioDeviceSetup setup;
     s.manager.getAudioDeviceSetup(setup);
+    if (chosenType == "ASIO") s.manager.closeAudioDevice();
     setup.inputDeviceName = deviceName;
     setup.outputDeviceName = "";
     // Open ALL of the device's capture channels (not just the default first pair),
