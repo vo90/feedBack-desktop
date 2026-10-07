@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 // ExtraInputs — the additional-physical-input-device registry (TLC plan
 // phase 5 / §2.3, was "Phase 2: additional input devices" inside AudioEngine).
@@ -97,6 +98,7 @@ public:
 
     // ── Control thread ────────────────────────────────────────────────────
     juce::String bind(int deviceKey, const juce::String& deviceName);
+    std::function<juce::String(juce::AudioDeviceManager&, const juce::String&, const juce::String&)> validateOpen;
     bool unbind(int deviceKey);
     // Close a slot's device but KEEP desiredDeviceName (transient close for
     // stop/reconfigure); reopenDesired() restores them after a (re)start.

@@ -30,6 +30,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     let currentDeviceTypes = [];
     let pendingDeviceSave = Promise.resolve();
     let latestDeviceOptionsRequest = 0;
+    let deviceOptionsCompatible = false;
+    let applyingDeviceSettings = false;
     let lastAppliedDeviceSettings = null;
 
     // ── Elements ──────────────────────────────────────────────────────────────
@@ -646,9 +648,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     function renderSampleRateOptions(sampleRates, preferredValue) {
-        const values = (Array.isArray(sampleRates) && sampleRates.length > 0 ? sampleRates : [44100, 48000, 96000])
+        const values = (Array.isArray(sampleRates) ? sampleRates : [])
             .map(Number)
-            .filter(Number.isFinite);
+            .filter(value => Number.isFinite(value) && value > 0);
         const preferred = Number(preferredValue);
         const preferredAvailable = Number.isFinite(preferred) && values.includes(preferred);
         const unique = Array.from(new Set(values)).sort((a, b) => a - b);
@@ -661,9 +663,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
     function renderBufferSizeOptions(bufferSizes, preferredValue) {
         const rate = Number(sampleRateSelect?.value) || 48000;
-        const values = (Array.isArray(bufferSizes) && bufferSizes.length > 0 ? bufferSizes : [64, 128, 256, 512, 1024])
+        const values = (Array.isArray(bufferSizes) ? bufferSizes : [])
             .map(Number)
-            .filter(Number.isFinite);
+            .filter(value => Number.isInteger(value) && value > 0);
         const preferred = Number(preferredValue);
         const preferredAvailable = Number.isFinite(preferred) && values.includes(preferred);
         const unique = Array.from(new Set(values)).sort((a, b) => a - b);
@@ -702,6 +704,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
     async function refreshDeviceOptions(preferred = {}) {
         const requestId = ++latestDeviceOptionsRequest;
+        deviceOptionsCompatible = false;
+        if (applyDeviceBtn) applyDeviceBtn.disabled = true;
         if (!api || typeof api.probeDeviceOptions !== 'function') {
             renderInputChannelOptions([], preferred.inputChannel);
             renderSampleRateOptions([], preferred.sampleRate);
@@ -739,6 +743,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         // all leave Apply disabled — we only enable when the native side
         // says `compatible: true`.
         const compatible = options != null && options.compatible === true;
+        deviceOptionsCompatible = compatible;
         if (srMismatchWarning) {
             // `compatible: false` can come from non-SR causes (addon
             // unavailable, device type missing, probe failure). Surface
@@ -766,7 +771,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             srMismatchWarning.textContent = banner;
         }
         if (applyDeviceBtn) {
-            applyDeviceBtn.disabled = !compatible;
+            applyDeviceBtn.disabled = applyingDeviceSettings || !compatible;
         }
 
         renderSampleRateOptions(options?.sampleRates, preferred.sampleRate);
@@ -1661,51 +1666,66 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         });
 
         applyDeviceBtn.addEventListener('click', async () => {
-            statusText.textContent = 'Configuring device...';
-            if (audioRunning) {
-                await api.stopAudio();
-                audioRunning = false;
-                // Reflect the stopped state in the UI immediately so a
-                // subsequent setDevice failure doesn't leave the label
-                // saying "Stop" while audioRunning is already false —
-                // the next click would otherwise *start* audio despite
-                // the label.
-                toggleBtn.textContent = 'Start';
-            }
-            const inputType = deviceTypeSelect.value;
-            const outputType = outputDeviceTypeSelect?.value || inputType;
-            const result = await api.setDevice({
-                inputType,
-                inputDevice: inputDeviceSelect.value,
-                outputType,
-                outputDevice: outputDeviceSelect.value,
-                sampleRate: parseFloat(sampleRateSelect.value),
-                bufferSize: parseInt(bufferSizeSelect.value),
-            });
-            const ok = typeof result === 'boolean' ? result : !!result?.ok;
-            const errMsg = (typeof result === 'object' && result?.error) ? String(result.error) : '';
-            if (ok) {
-                const inputChannel = parseInt(inputChannelSelect.value);
-                if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
-                await api.setMonitorMute(monitorMuteCheckbox.checked);
-                await api.setMonitorKill?.(monitorKillCheckbox.checked);
-                await api.startAudio();
-                audioRunning = true;
-                toggleBtn.textContent = 'Stop';
-                statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
-                const modeLabel = (typeof result === 'object' && result?.duplex === false)
-                    ? ' (split mode)' : '';
-                statusText.textContent = 'Audio running' + modeLabel;
-                aeApplyNoiseGateToEngine();
-                aeApplyTonePolishToEngine();
-                syncSelectedInputSource(inputType, inputDeviceSelect.value);
-                const applied = rememberAppliedDeviceSettings();
-                await saveDeviceSettings(applied);
-            } else {
-                statusText.textContent = errMsg
-                    ? `Failed to configure device: ${errMsg}`
-                    : 'Failed to configure device';
+            if (applyingDeviceSettings || !deviceOptionsCompatible) return;
+            applyingDeviceSettings = true;
+            const controls = [deviceTypeSelect, outputDeviceTypeSelect, inputDeviceSelect,
+                outputDeviceSelect, sampleRateSelect, bufferSizeSelect, inputChannelSelect,
+                toggleBtn, applyDeviceBtn].filter(Boolean);
+            controls.forEach(control => { control.disabled = true; });
+            try {
+                statusText.textContent = 'Configuring device...';
+                if (audioRunning) {
+                    await api.stopAudio();
+                    audioRunning = false;
+                    // Reflect the stopped state in the UI immediately so a
+                    // subsequent setDevice failure doesn't leave the label
+                    // saying "Stop" while audioRunning is already false —
+                    // the next click would otherwise *start* audio despite
+                    // the label.
+                    toggleBtn.textContent = 'Start';
+                }
+                const inputType = deviceTypeSelect.value;
+                const outputType = outputDeviceTypeSelect?.value || inputType;
+                const result = await api.setDevice({
+                    inputType,
+                    inputDevice: inputDeviceSelect.value,
+                    outputType,
+                    outputDevice: outputDeviceSelect.value,
+                    sampleRate: parseFloat(sampleRateSelect.value),
+                    bufferSize: parseInt(bufferSizeSelect.value),
+                });
+                const ok = typeof result === 'boolean' ? result : !!result?.ok;
+                const errMsg = (typeof result === 'object' && result?.error) ? String(result.error) : '';
+                if (ok) {
+                    const inputChannel = parseInt(inputChannelSelect.value);
+                    if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
+                    await api.setMonitorMute(monitorMuteCheckbox.checked);
+                    await api.setMonitorKill?.(monitorKillCheckbox.checked);
+                    await api.startAudio();
+                    audioRunning = true;
+                    toggleBtn.textContent = 'Stop';
+                    statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
+                    const modeLabel = (typeof result === 'object' && result?.duplex === false)
+                        ? ' (split mode)' : '';
+                    statusText.textContent = 'Audio running' + modeLabel;
+                    aeApplyNoiseGateToEngine();
+                    aeApplyTonePolishToEngine();
+                    syncSelectedInputSource(inputType, inputDeviceSelect.value);
+                    const applied = rememberAppliedDeviceSettings();
+                    await saveDeviceSettings(applied);
+                } else {
+                    statusText.textContent = errMsg
+                        ? `Failed to configure device: ${errMsg}`
+                        : 'Failed to configure device';
+                    statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
+                }
+            } catch (error) {
+                statusText.textContent = `Failed to configure device: ${error?.message || error}`;
                 statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
+            } finally {
+                applyingDeviceSettings = false;
+                controls.forEach(control => { control.disabled = false; });
+                applyDeviceBtn.disabled = !deviceOptionsCompatible;
             }
         });
 

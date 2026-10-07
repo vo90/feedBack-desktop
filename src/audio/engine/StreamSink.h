@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <functional>
 
 namespace slopsmith {
 
@@ -42,6 +43,8 @@ public:
     // string = success. v1 requires the sink's nominal SR to match the engine
     // rate (no async resampler yet); a mismatch is rejected with a clear error.
     juce::String open(const juce::String& typeName, const juce::String& deviceName);
+    std::function<juce::String(juce::AudioDeviceManager&, const juce::String&, const juce::String&)> validateOpen;
+    juce::AudioDeviceManager& getManager() { return manager; }
     // Detach + close but KEEP desiredTypeName/Name so reopenDesired() can
     // restore it after a stop/restart (intent survives). Idempotent.
     void close();

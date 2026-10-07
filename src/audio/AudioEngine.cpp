@@ -29,6 +29,14 @@ inline bool firstN(std::atomic<uint32_t>& c) { return c.fetch_add(1, std::memory
 
 AudioEngine::AudioEngine()
 {
+    deviceSetup.registerAdditionalManager(streamSink.getManager());
+    for (auto& slot : extraInputs.slots) deviceSetup.registerAdditionalManager(slot.manager);
+    auto validateOpen = [this](juce::AudioDeviceManager& manager, const juce::String& type,
+                               const juce::String& name) {
+        return deviceSetup.validateAdditionalOpen(manager, type, name);
+    };
+    streamSink.validateOpen = validateOpen;
+    extraInputs.validateOpen = validateOpen;
 
     // Start the backing read-ahead worker so the transport's BufferingAudioSource
     // always has a live thread to pull decoded audio on. It sleeps while idle and
@@ -280,85 +288,23 @@ AudioEngine::LatencyBreakdown AudioEngine::getLatencyBreakdown() const
 
 bool AudioEngine::setDeviceType(const juce::String& typeName)
 {
-    if (auto* currentType = inputDeviceManager.getCurrentDeviceTypeObject())
-    {
-        if (currentType->getTypeName() == typeName)
-        {
-            fprintf(stderr, "[AudioEngine] Input device type already selected: %s\n", typeName.toRawUTF8());
-            return true;
-        }
-    }
-
-    for (auto* type : inputDeviceManager.getAvailableDeviceTypes())
-    {
-        if (type->getTypeName() == typeName)
-        {
-            try {
-                fprintf(stderr, "[AudioEngine] Setting input device type: %s\n", typeName.toRawUTF8());
-                inputDeviceManager.setCurrentAudioDeviceType(typeName, true);
-                // Legacy single-type API contract: callers expect both
-                // managers to track the same backend so a subsequent
-                // duplex configure or probe sees a consistent dual state.
-                // setOutputDeviceType() exists for callers that want to
-                // diverge the two sides intentionally. Best-effort — if
-                // the output side doesn't expose this backend the input
-                // change still stands so duplex on the matched backend
-                // keeps working.
-                if (auto* currentOutputType = outputDeviceManager.getCurrentDeviceTypeObject())
-                {
-                    if (currentOutputType->getTypeName() != typeName)
-                    {
-                        for (auto* outType : outputDeviceManager.getAvailableDeviceTypes())
-                        {
-                            if (outType->getTypeName() == typeName)
-                            {
-                                try { outputDeviceManager.setCurrentAudioDeviceType(typeName, true); }
-                                catch (...) {
-                                    fprintf(stderr, "[AudioEngine] setDeviceType: output sync threw (continuing)\n");
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-                return true;
-            } catch (const std::exception& e) {
-                fprintf(stderr, "[AudioEngine] setDeviceType crashed: %s\n", e.what());
-                return false;
-            } catch (...) {
-                fprintf(stderr, "[AudioEngine] setDeviceType crashed (unknown)\n");
-                return false;
-            }
-        }
-    }
-    return false;
+    DeviceConfig config;
+    config.inputType = typeName;
+    config.outputType = typeName;
+    config.sampleRate = getCurrentSampleRate();
+    config.bufferSize = getCurrentBlockSize();
+    return setAudioDevices(config).ok;
 }
 
 bool AudioEngine::setOutputDeviceType(const juce::String& typeName)
 {
-    if (duplexMode.load(std::memory_order_relaxed))
-        return setDeviceType(typeName);
-
-    if (auto* currentType = outputDeviceManager.getCurrentDeviceTypeObject())
-    {
-        if (currentType->getTypeName() == typeName)
-            return true;
-    }
-    for (auto* type : outputDeviceManager.getAvailableDeviceTypes())
-    {
-        if (type->getTypeName() == typeName)
-        {
-            try {
-                fprintf(stderr, "[AudioEngine] Setting output device type: %s\n", typeName.toRawUTF8());
-                outputDeviceManager.setCurrentAudioDeviceType(typeName, true);
-                return true;
-            } catch (...) {
-                fprintf(stderr, "[AudioEngine] setOutputDeviceType crashed\n");
-                return false;
-            }
-        }
-    }
-    return false;
+    DeviceConfig config;
+    config.inputType = getCurrentInputDeviceType();
+    config.inputDevice = getCurrentInputDevice();
+    config.outputType = typeName;
+    config.sampleRate = getCurrentSampleRate();
+    config.bufferSize = getCurrentBlockSize();
+    return setAudioDevices(config).ok;
 }
 
 bool AudioEngine::setAudioDevice(const juce::String& inputName, const juce::String& outputName,
@@ -422,6 +368,15 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     juce::String resolvedOutputType = config.outputType.isEmpty()
         ? resolvedInputType : config.outputType;
 
+    DeviceConfig namedConfig = config;
+    namedConfig.inputType = resolvedInputType;
+    namedConfig.outputType = resolvedOutputType;
+    if (auto error = deviceSetup.resolveConfigDeviceNames(namedConfig); error.isNotEmpty())
+    {
+        res.error = error;
+        return res;
+    }
+
     // Stop audio BEFORE mutating device-type or device setup. JUCE can
     // tear down and re-scan devices inside setCurrentAudioDeviceType /
     // setAudioDeviceSetup, and doing that while the audio callback is
@@ -451,6 +406,14 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
     // second interface survive a device/sample-rate/buffer change automatically).
     stopAudio();
 
+    // Switching roles (e.g. ASIO output -> ASIO input) must release the old
+    // owner's driver before setCurrentAudioDeviceType auto-opens a new one.
+    if (auto error = deviceSetup.closeAsioDevicesForReconfigure(); error.isNotEmpty())
+    {
+        res.error = error;
+        return res;
+    }
+
     // setCurrentAudioDeviceType can throw from inside JUCE backends (ASIO
     // is the usual culprit). Catch and propagate as a structured error so
     // the N-API caller doesn't see the exception cross the boundary.
@@ -472,19 +435,14 @@ AudioEngine::DeviceConfigResult AudioEngine::setAudioDevices(const DeviceConfig&
         return res;
     }
 
-    // Don't resolve empty names to first-device-of-each-type. Pre-PR
-    // behavior — and Copilot's fail-closed concern — treat empty names
-    // as "OS default" per side. Filling them with inputs[0] / outputs[0]
-    // is JUCE-enumeration-order dependent and can pick the wrong device
-    // (e.g. an audio interface that isn't the system default). Both
-    // applyDuplexSetup and applySplitSetup handle empty names by setting
-    // useDefault*Channels=true, letting JUCE select the OS default.
-    const juce::String& resolvedInput  = config.inputDevice;
-    const juce::String& resolvedOutput = config.outputDevice;
+    // Default and explicit aliases must resolve before classifying duplex.
+    // Otherwise one ASIO interface can be opened twice as a split pair.
+    const juce::String& resolvedInput  = namedConfig.inputDevice;
+    const juce::String& resolvedOutput = namedConfig.outputDevice;
 
     const bool sameBackendType = (resolvedInputType == resolvedOutputType);
     const bool sameEndpointIntent = sameBackendType
-                                    && config.inputDevice == config.outputDevice;
+                                    && resolvedInput == resolvedOutput;
 
     // Normalize before branching — applyDuplexSetup() only checks `> 0` and
     // would otherwise let Infinity (or NaN slipping past N-API) reach JUCE
