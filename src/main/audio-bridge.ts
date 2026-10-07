@@ -10,6 +10,7 @@ import { isDebugEnabled, getDebugLogPath } from './debug-log';
 import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 import { readBackingSnapshot, createBackingClockPublisher } from './backing-clock';
+import { createRendererAudioPortBridge } from './renderer-audio-port';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
@@ -959,6 +960,30 @@ export function initAudioBridge(): void {
     });
 
     // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ────────
+    const rendererPorts = createRendererAudioPortBridge((pcm, rate) => audio?.pushRendererAudio?.(pcm, rate));
+    const watchedAudioSenders = new WeakSet<Electron.WebContents>();
+    ipcMain.on('audio:attachRendererAudioPort', (event, id: unknown) => {
+        const port = event.ports[0];
+        if (!port) return;
+        if (event.senderFrame !== event.sender.mainFrame || event.ports.length !== 1) {
+            event.ports.forEach(p => p.close()); return;
+        }
+        const owner = event.sender.id;
+        if (!watchedAudioSenders.has(event.sender)) {
+            watchedAudioSenders.add(event.sender);
+            event.sender.on('render-process-gone', () => rendererPorts.close(owner));
+            event.sender.once('destroyed', () => rendererPorts.close(owner));
+        }
+        try {
+            const ok = rendererPorts.attach(owner, id, port);
+            event.senderFrame?.send('audio:rendererAudioPortReady', id, ok);
+        } catch {
+            // Navigation/teardown can close the frame or port during setup.
+            rendererPorts.close(owner); port.close();
+        }
+    });
+    ipcMain.handle('audio:hasRendererAudioPort', (event, id: string) => rendererPorts.has(event.sender.id, id));
+    ipcMain.handle('audio:closeRendererAudioPort', (event, id: string) => rendererPorts.close(event.sender.id, id));
     ipcMain.handle('audio:setRendererBus', (_event, enabled: unknown, gain: unknown) => {
         if (audio && typeof audio.setRendererBus === 'function') {
             const en = enabled === true;

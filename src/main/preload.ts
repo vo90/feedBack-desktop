@@ -3,6 +3,26 @@
 // window.feedBackDesktop for audio engine and desktop features.
 
 const { contextBridge, ipcRenderer } = require('electron');
+// This build uses Node's lib types; describe only the preload DOM surface here.
+declare const window: {
+    location: { origin: string };
+    addEventListener(type: 'message', listener: (event: {
+        source: unknown; origin: string; data: any; ports: unknown[];
+    }) => void): void;
+    postMessage(data: unknown, origin: string): void;
+};
+// Transfer the worklet endpoint once. PCM then travels worklet -> main directly,
+// even while the game UI is busy. contextBridge cannot transfer DOM MessagePorts.
+window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== window.location.origin
+        || event.data?.type !== 'feedback-renderer-audio-port'
+        || typeof event.data.id !== 'string' || event.data.id.length > 128
+        || event.ports.length !== 1) return;
+    ipcRenderer.postMessage('audio:attachRendererAudioPort', event.data.id, [event.ports[0]]);
+});
+ipcRenderer.on('audio:rendererAudioPortReady', (_event: unknown, id: string, ok: boolean) => {
+    window.postMessage({ type: 'feedback-renderer-audio-port-ready', id, ok }, window.location.origin);
+});
 import type { StartupStatus } from './python';
 // Type-only imports (erased at compile) — no runtime require, so the preload
 // bundle never drags in config-reset's electron/python/fs dependencies.
@@ -425,6 +445,9 @@ const feedBackDesktopApi = {
         // worklet's drain loop; check getRendererBusMetrics() for health.
         pushRendererAudio: (interleavedLR: Float32Array, sourceRate: number): void =>
             ipcRenderer.send('audio:pushRendererAudio', interleavedLR, sourceRate),
+        rendererAudioPortVersion: 1,
+        hasRendererAudioPort: (id: string): Promise<boolean> => ipcRenderer.invoke('audio:hasRendererAudioPort', id),
+        closeRendererAudioPort: (id: string): Promise<boolean> => ipcRenderer.invoke('audio:closeRendererAudioPort', id),
         getRendererBusMetrics: (): Promise<{
             enabled: boolean; fillFrames: number; capacityFrames: number;
             pushedFrames: number; consumedFrames: number;
