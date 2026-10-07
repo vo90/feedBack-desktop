@@ -27,13 +27,11 @@ class RendererBus
 {
 public:
     static constexpr int kFrames = 65536;
-    // Prefill gate: consume nothing until the producer has built this cushion
-    // (~10.7 ms @ 48 kHz); re-armed after every underflow so stall recovery is
-    // one clean gap. Fill clamp: fill beyond kMaxFillFrames (~85 ms) means a
-    // renderer stall dumped a backlog — trim to the prime target, don't play
-    // the tail.
-    static constexpr int kPrimeFrames   = 512;
-    static constexpr int kMaxFillFrames = 4096;
+    // Keep ~10 ms of scheduling reserve AFTER consuming a complete output
+    // block. Both the prime gate and backlog limit must include that block:
+    // a fixed 512-frame gate can repeatedly underflow on 2048-frame ASIO output.
+    // A fixed 4096-frame clamp also left shared output ~75 ms behind after
+    // device changes. The reserve scales with the actual output sample rate.
 
     void setEnabled(bool enabled, float gain)
     {
@@ -89,6 +87,8 @@ public:
         // to step == 1.0 (still exact: pos stays integral, frac == 0).
         const double step = sourceRate / deviceRate;
         if (!std::isfinite(step) || step <= 0.0) return false;
+        reserveFrames.store((int) std::fmin(kFrames / 4,
+            std::fmax(1.0, std::ceil(deviceRate * 0.010))), std::memory_order_relaxed);
         double pos = srcPos;
         uint64_t written = 0;
         while (true)
@@ -122,6 +122,7 @@ public:
     // call exactly once per output block.
     int pull(float* dl, float* dr, int numSamples)
     {
+        if (numSamples <= 0 || numSamples > kFrames / 2) return 0;
         // Consume a pending flush FIRST — even while disabled — so the tail
         // buffered before a disable is dropped by the ring's one legitimate
         // readIndex writer (this consumer), never by the control thread. Flush
@@ -147,14 +148,15 @@ public:
         }
         uint64_t avail = w - r;
 
-        // Fill clamp (spike finding): steady-state drift is near zero, so a
-        // fill beyond kMaxFillFrames only ever means a renderer stall dumped a
-        // backlog. Trim to the prime target instead of playing the whole tail
-        // at ~85+ ms behind — a latency reset, not an audible gap.
-        if (avail > (uint64_t) kMaxFillFrames)
+        const uint64_t reserve = (uint64_t) reserveFrames.load(std::memory_order_relaxed);
+        const uint64_t primeTarget = (uint64_t) numSamples + reserve;
+        const uint64_t maxFill = primeTarget + reserve;
+        // Drop a renderer stall's stale backlog to one block + reserve. Only
+        // this consumer moves readIndex; producer and device clocks stay apart.
+        if (avail > maxFill)
         {
-            r = w - (uint64_t) kPrimeFrames;
-            avail = (uint64_t) kPrimeFrames;
+            r = w - primeTarget;
+            avail = primeTarget;
             overflowCount.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -164,7 +166,7 @@ public:
         // underflow so stall recovery is one clean gap, not a ragged refill.
         if (!primed)
         {
-            if (avail < (uint64_t) kPrimeFrames)
+            if (avail < primeTarget)
             {
                 ring.commitRead(r);
                 return 0;
@@ -224,6 +226,7 @@ private:
     std::atomic<uint64_t> overflowCount{0};
     std::atomic<bool>  busEnabled{false};
     std::atomic<float> busGain{1.0f};
+    std::atomic<int> reserveFrames{480};
     // Consumer-side prefill-gate state. Only the live output callback touches
     // it, but duplex/split hand-offs cross threads — atomic keeps that safe.
     std::atomic<bool> primed{false};
