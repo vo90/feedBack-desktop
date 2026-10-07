@@ -37,6 +37,7 @@ juce::AudioIODevice* DeviceSetup::findExistingDevice(juce::AudioIODeviceType* ty
     for (auto* manager : managers)
     {
         auto* device = manager->getCurrentAudioDevice();
+        if (device == nullptr) continue;
         auto* existingType = manager->getCurrentDeviceTypeObject();
         if (device == nullptr || existingType == nullptr
             || existingType->getTypeName() != type->getTypeName())
