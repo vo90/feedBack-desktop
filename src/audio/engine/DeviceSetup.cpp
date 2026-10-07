@@ -11,6 +11,21 @@
 
 namespace slopsmith {
 
+static void validateDeviceOptions(DeviceOptions& options)
+{
+    for (int i = options.sampleRates.size(); --i >= 0;)
+        if (!std::isfinite(options.sampleRates[i]) || options.sampleRates[i] <= 0)
+            options.sampleRates.remove(i);
+    for (int i = options.bufferSizes.size(); --i >= 0;)
+        if (options.bufferSizes[i] <= 0) options.bufferSizes.remove(i);
+    if (options.inputChannels.isEmpty() || options.outputChannels.isEmpty()
+        || options.sampleRates.isEmpty() || options.bufferSizes.isEmpty())
+    {
+        options.compatible = false;
+        if (options.error.isEmpty()) options.error = "Device has no usable channels or audio formats";
+    }
+}
+
 juce::String DeviceSetup::closeAsioDevicesForReconfigure()
 {
     for (auto* manager : { &inMgr, &outMgr })
@@ -255,6 +270,7 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
                     options.sampleRates.addIfNotAlreadyThere(rate);
                 for (auto size : liveDevice->getAvailableBufferSizes())
                     options.bufferSizes.addIfNotAlreadyThere(size);
+                validateDeviceOptions(options);
 
                 fprintf(stderr, "[AudioEngine] Probed live device options: "
                         "inType='%s' outType='%s' in='%s' out='%s' "
@@ -367,12 +383,7 @@ DeviceOptions DeviceSetup::probeDual(const juce::String& inputTypeName,
             }
         }
 
-        if (options.inputChannels.isEmpty() || options.outputChannels.isEmpty()
-            || options.sampleRates.isEmpty() || options.bufferSizes.isEmpty())
-        {
-            options.compatible = false;
-            if (options.error.isEmpty()) options.error = "Device has no usable channels or audio formats";
-        }
+        validateDeviceOptions(options);
 
         fprintf(stderr, "[AudioEngine] Probed device options: inType='%s' outType='%s' in='%s' out='%s' "
                 "duplex=%d inputs=%d outputs=%d rates=%d buffers=%d compatible=%d\n",

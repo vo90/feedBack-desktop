@@ -9,7 +9,7 @@ void NoiseGate::prepare(double, int) { throw std::logic_error("unexpected gate p
 void TonePolish::prepare(double) { throw std::logic_error("unexpected tone prepare"); }
 
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
-struct Driver { int instances = 0, creations = 0, duplicates = 0; };
+struct Driver { int instances = 0, creations = 0, duplicates = 0; bool inputAvailable = true; };
 class Device final : public juce::AudioIODevice
 {
 public:
@@ -20,7 +20,8 @@ public:
         ++driver.instances; ++driver.creations;
     }
     ~Device() override { --driver.instances; }
-    juce::StringArray getInputChannelNames() override { return {"1", "2", "3", "4", "5", "6", "7", "8"}; }
+    juce::StringArray getInputChannelNames() override
+    { return driver.inputAvailable ? juce::StringArray {"1", "2", "3", "4", "5", "6", "7", "8"} : juce::StringArray(); }
     juce::StringArray getOutputChannelNames() override { return {"L", "R"}; }
     juce::Array<double> getAvailableSampleRates() override { return {48000}; }
     juce::Array<int> getAvailableBufferSizes() override { return {128, 256, 512}; }
@@ -108,6 +109,10 @@ int main()
         require(setup.validateAdditionalOpen(additional, "ASIO", "").isNotEmpty(),
                 "extra output Default must not reopen primary ASIO");
         const int creations = asio.creations;
+        asio.inputAvailable = false;
+        require(!setup.probeDual("ASIO", "Test interface", "ASIO", "").compatible,
+                "owned device without input channels must fail closed");
+        asio.inputAvailable = true;
         for (int i = 0; i < 10; ++i)
         {
             const auto split = setup.probeDual("ASIO", "Test interface", "Windows Audio", "Test speakers");
