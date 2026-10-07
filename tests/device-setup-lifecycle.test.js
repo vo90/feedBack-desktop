@@ -2,8 +2,8 @@
 
 // Source-level lifecycle contract for the hardware-dependent half of the ASIO
 // repair. The pure format decision table is covered by rate_match_test.cpp;
-// these assertions pin the ordering that cannot be exercised without loading
-// a real Windows ASIO driver in CI.
+// these assertions supplement the fake-driver behavioral probe regression in
+// engine_units/device_probe_test.cpp.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -28,8 +28,7 @@ test('duplex probe reuses an exact live endpoint before constructing a competing
     assert.ok(probeStart >= 0 && probeEnd > probeStart, 'could not locate probeDual');
 
     const inspectLive = probeDual.indexOf('inMgr.getCurrentAudioDevice()');
-    const exactEndpoint = probeDual.indexOf('const bool requestedEndpointIsLive');
-    const requireOpen = probeDual.indexOf('liveDevice->isOpen()', exactEndpoint);
+    const exactEndpoint = probeDual.indexOf('bool requestedEndpointIsLive');
     const reuseChannels = probeDual.indexOf(
         'options.inputChannels = liveDevice->getInputChannelNames()');
     const temporaryProbe = probeDual.indexOf(
@@ -37,9 +36,10 @@ test('duplex probe reuses an exact live endpoint before constructing a competing
 
     assert.ok(inspectLive >= 0 && exactEndpoint > inspectLive,
         'the probe must inspect and identity-check the live endpoint');
-    assert.ok(requireOpen > exactEndpoint && reuseChannels > requireOpen
-        && temporaryProbe > reuseChannels,
+    assert.ok(reuseChannels > exactEndpoint && temporaryProbe > reuseChannels,
         'matching live capabilities must be returned before a temporary device is created');
+    // ASIO objects retain driver ownership even after close().
+    assert.doesNotMatch(probeDual, /liveDevice->isOpen\(\)/);
 });
 
 test('duplex setup closes Windows ASIO before constructing its channel probe', () => {
