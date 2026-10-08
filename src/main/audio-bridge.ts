@@ -14,6 +14,7 @@ import { createRendererAudioPortBridge } from './renderer-audio-port';
 import { readAudioRouteTiming } from './audio-route-timing';
 import { resolveVerifierTiming } from './verifier-timing';
 import { createCalibrationStore } from './audio-calibration';
+import { createGuidedCalibration, calibrationWave } from './guided-calibration';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
@@ -261,6 +262,33 @@ function loadNativeAddon(): AudioModule | null {
 }
 
 export function initAudioBridge(): void {
+    const guided = createGuidedCalibration({
+        audio: () => audio,
+        profile: () => calibrations().read(audio?.getCurrentDevice?.()),
+        snapshot: () => readBackingSnapshot(audio),
+        save: (key, offset) => calibrations().save('output', key, offset),
+        asset: () => {
+            const file = path.join(app.getPath('userData'), 'calibration-cache', 'clicks-v1.wav');
+            fs.mkdirSync(path.dirname(file), {recursive: true});
+            const bytes = calibrationWave();
+            if (!fs.existsSync(file) || !fs.readFileSync(file).equals(bytes)) fs.writeFileSync(file, bytes);
+            return file;
+        },
+    });
+    const leaseTimer = setInterval(() => { void guided.expire().catch(e => console.warn('[calibration] cleanup failed', e)); }, 1000);
+    leaseTimer.unref();
+    const observedSenders = new WeakSet<Electron.WebContents>();
+    ipcMain.handle('audio:beginGuidedCalibration', event => {
+        if (!observedSenders.has(event.sender)) {
+            observedSenders.add(event.sender);
+            const senderId = event.sender.id;
+            event.sender.once('destroyed', () => { void guided.abandon(senderId).catch(() => {}); });
+        }
+        return guided.begin(event.sender.id);
+    });
+    ipcMain.handle('audio:playCalibrationTrial', (event, token: string, volume: number) => guided.trial(token, event.sender.id, volume));
+    ipcMain.handle('audio:pollCalibration', (event, token: string) => guided.poll(token, event.sender.id));
+    ipcMain.handle('audio:finishGuidedCalibration', (event, token: string, offset?: number) => guided.finish(token, event.sender.id, offset));
     audio = loadNativeAddon();
     const audioEffects = createAudioEffectsExecutor(() => audio);
 
@@ -595,8 +623,9 @@ export function initAudioBridge(): void {
         return calibrations().read(device, legacyAvMs, Number.isInteger(device?.inputChannel) ? device.inputChannel : (Number.isInteger(channel) ? channel : -1), legacyInputMs);
     });
     ipcMain.handle('audio:saveCalibration', (_event, direction: 'input' | 'output', key: string, offsetMs: number) =>
-        calibrations().save(direction, key, offsetMs));
+        !guided.active && calibrations().save(direction, key, offsetMs));
     ipcMain.handle('audio:setCalibrationMode', (_event, perOutputSetup: boolean, currentOffsetMs: number) => {
+        if (guided.active) return null;
         if (!audio?.isAudioRunning?.() || typeof audio?.loadBackingSession !== 'function') return null;
         const device = audio.getCurrentDevice?.();
         if (!calibrations().read(device).output || !calibrations().setPerOutputSetup(perOutputSetup, currentOffsetMs)) return null;
@@ -622,6 +651,7 @@ export function initAudioBridge(): void {
     // ── Gain ───────────────────────────────────────────────────────────────
 
     ipcMain.handle('audio:setGain', (_event, which: string, value: number) => {
+        if (which === 'backing') return guided.run('setGain', which, value);
         audio?.setGain(which, value);
     });
 
@@ -1372,7 +1402,7 @@ export function initAudioBridge(): void {
     // ── Backing Track ──────────────────────────────────────────────────────
 
     ipcMain.handle('audio:loadBackingTrack', (_event, filePath: string) => {
-        return audio?.loadBackingTrack(filePath) ?? false;
+        return guided.run('loadBackingTrack', filePath);
     });
     ipcMain.handle('audio:backingSessionCapabilities', () => ({
         version: typeof audio?.loadBackingSession === 'function' && typeof audio?.setBackingSourceGains === 'function' ? 2 : 0,
@@ -1383,17 +1413,17 @@ export function initAudioBridge(): void {
             || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))
             || typeof fullMixLast !== 'boolean' || !Array.isArray(gains) || gains.length !== paths.length
             || gains.some(g => typeof g !== 'number' || !Number.isFinite(g) || g < 0 || g > 2)) return false;
-        return audio?.loadBackingSession?.(paths, gains, fullMixLast) ?? false;
+        return guided.run('loadBackingSession', paths, gains, fullMixLast);
     });
     ipcMain.handle('audio:setBackingSourceGains', (_event, gains: unknown) => {
         if (!Array.isArray(gains) || !gains.length || gains.length > 32
             || gains.some(g => typeof g !== 'number' || !Number.isFinite(g) || g < 0 || g > 2)) return false;
-        return audio?.setBackingSourceGains?.(gains) ?? false;
+        return guided.run('setBackingSourceGains', gains);
     });
 
-    ipcMain.handle('audio:startBacking', () => audio?.startBacking());
-    ipcMain.handle('audio:stopBacking', () => audio?.stopBacking());
-    ipcMain.handle('audio:seekBacking', (_event, seconds: number) => audio?.seekBacking(seconds));
+    ipcMain.handle('audio:startBacking', () => guided.run('startBacking'));
+    ipcMain.handle('audio:stopBacking', () => guided.run('stopBacking'));
+    ipcMain.handle('audio:seekBacking', (_event, seconds: number) => guided.run('seekBacking', seconds));
     ipcMain.handle('audio:getBackingPosition', () => audio?.getBackingPosition() ?? 0);
     ipcMain.handle('audio:getBackingSnapshot', () => readBackingSnapshot(audio));
     ipcMain.handle('audio:getBackingAnalysis', () => audio?.getBackingAnalysis?.() ?? null);
@@ -1415,7 +1445,7 @@ export function initAudioBridge(): void {
         // a rejected call from a successful one.
         if (!Number.isFinite(speed) || speed <= 0) return false;
         try {
-            return await audio.setBackingSpeed(speed) !== false;
+            return await guided.run('setBackingSpeed', speed) !== false;
         } catch (e: unknown) {
             console.warn(`[audio] setBackingSpeed failed: ${e instanceof Error ? e.message : String(e)}`);
             return false;

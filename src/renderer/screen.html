@@ -101,6 +101,8 @@
     <!-- Output calibration follows the applied device, not pending dropdown edits. -->
     <section class="mb-6 p-4 rounded-lg bg-slate-800/50 border border-slate-700" aria-labelledby="ae-av-heading">
         <h3 id="ae-av-heading" class="text-lg font-semibold mb-3 text-slate-200">Audio / visual calibration</h3>
+        <p class="text-sm text-slate-400 mb-3">Line up what you hear with what you see. A short guided comparison helps you find a comfortable match.</p>
+        <button id="ae-av-guide" class="mb-4 px-4 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold hover:bg-emerald-400">Calibrate audio/video</button>
         <label class="flex items-center gap-2 text-sm text-slate-200">
             <input id="ae-av-remember" type="checkbox" checked disabled class="accent-emerald-500"
                    aria-describedby="ae-av-help">
@@ -109,10 +111,13 @@
         <p id="ae-av-help" class="text-xs text-slate-400 mt-2">On: save separately for each output device, audio mode, sample rate and buffer size. Off: use one shared value across outputs. Your saved device values are kept.</p>
         <p id="ae-av-route" class="text-sm text-slate-300 mt-3">Start audio and apply a device to view its calibration.</p>
         <p id="ae-av-status" class="text-xs text-slate-400 mt-2" role="status" aria-live="polite"></p>
-        <label for="ae-av-offset" class="block text-sm text-slate-200 mt-3">AV correction: <span id="ae-av-value">0 ms</span></label>
+        <p class="text-sm text-slate-200 mt-3">Current correction: <span id="ae-av-value">0 ms</span></p>
+        <details class="mt-3"><summary class="text-sm text-slate-300 cursor-pointer">Fine-tune manually</summary>
+        <label for="ae-av-offset" class="block text-sm text-slate-200 mt-3">AV correction</label>
         <input id="ae-av-offset" type="range" min="-1000" max="1000" step="1" value="0" disabled
                oninput="setAvOffsetMs(this.value)" class="w-full accent-emerald-500" aria-describedby="ae-av-direction">
         <p id="ae-av-direction" class="text-xs text-slate-400 mt-2">If the highway is ahead of the sound, decrease this value. Changes save automatically. Input correction is separate.</p>
+        </details>
         <p class="text-xs text-slate-400 mt-2">The active setup updates after Apply succeeds. Browser compatibility playback keeps its separate AV value.</p>
     </section>
 
