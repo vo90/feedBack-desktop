@@ -17,6 +17,47 @@ test('direct worklet packets reach native output once with their source rate', (
     assert.equal(bridge.attach(1,'one',port),true); assert.equal(port.started,true);
     port.send(); assert.deepEqual(pushed,[{pcm:[.25,-.25],rate:48000}]);
 });
+
+test('timing records frame continuity and receipt intervals without subtracting different clocks', () => {
+    let time = 100;
+    const bridge = createRendererAudioPortBridge(() => {}, () => time), port = new Port();
+    bridge.attach(1, 'one', port);
+    assert.equal(bridge.snapshot(1).lastReceivedAtMs, null);
+    function send(sequence, firstFrame) {
+        port.emit('message', { data: { pcm: new Float32Array(512), sampleRate: 48000,
+            timing: { version: 1, sequence, firstFrame, endFrame: firstFrame + 256 } } });
+    }
+    time = 105; send(0, 4096); time = 110; send(1, 4352); time = 150; send(3, 4864);
+    const s = bridge.snapshot(1);
+    assert.equal(s.packetsReceived, 3); assert.equal(s.framesReceived, 768);
+    assert.equal(s.packetsWithTiming, 3); assert.equal(s.discontinuities, 1);
+    assert.equal(s.maxReceiptIntervalMs, 40); assert.equal(s.lastReceivedAtMs, 150);
+    assert.equal(s.sourceToReceiptMs, null); assert.equal(s.lastSourcePacket.endFrame, 5120);
+    s.lastSourcePacket.sequence = 1000; assert.equal(bridge.snapshot(1).lastSourcePacket.sequence, 3);
+    assert.equal(bridge.snapshot(2), null, 'other window cannot see this capture');
+});
+
+test('optional invalid or legacy timing cannot stop otherwise valid PCM', () => {
+    const { bridge, pushed } = harness(), port = new Port(); bridge.attach(1, 'one', port);
+    for (const timing of [null, {}, { version: 2 }, { version: 1, sequence: 0, firstFrame: 0, endFrame: 20 },
+        { version: 1, sequence: Infinity, firstFrame: 0, endFrame: 1 }]) {
+        port.emit('message', { data: { pcm: new Float32Array(2), sampleRate: 48000, timing } });
+    }
+    assert.equal(pushed.length, 5); const s = bridge.snapshot(1);
+    assert.equal(s.invalidTimingPackets, 4); assert.equal(s.packetsWithTiming, 0);
+    assert.equal(s.lastSourcePacket, null); assert.equal(s.discontinuities, 0);
+    port.send([], 48000); assert.equal(bridge.snapshot(1).rejectedPackets, 1);
+});
+
+test('replacing capture starts a fresh epoch and old events cannot alter its counters', () => {
+    const { bridge } = harness(), old = new Port(), next = new Port();
+    bridge.attach(1, 'old', old); old.send(); const before = bridge.snapshot(1).captureEpoch;
+    bridge.attach(1, 'new', next); old.send(); old.emit('close');
+    const after = bridge.snapshot(1);
+    assert.equal(after.captureEpoch, before + 1); assert.equal(after.packetsReceived, 0);
+    assert.equal(after.maxReceiptIntervalMs, null); assert.equal(after.lastSourcePacket, null);
+    bridge.close(1); assert.equal(bridge.snapshot(1), null);
+});
 test('replacing a producer closes the old port and ignores its queued packets and close', () => {
     const {bridge,pushed} = harness(), old = new Port(), current = new Port();
     bridge.attach(1,'old',old); bridge.attach(1,'new',current);

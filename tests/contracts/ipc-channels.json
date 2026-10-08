@@ -14,6 +14,7 @@
   "audio:closePluginEditor",
   "audio:closeRendererAudioPort",
   "audio:detectNotes",
+  "audio:getAudioRouteTiming",
   "audio:getBackingDuration",
   "audio:getBackingLevel",
   "audio:getBackingPosition",
