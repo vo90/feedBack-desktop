@@ -446,6 +446,8 @@ const feedBackDesktopApi = {
         pushRendererAudio: (interleavedLR: Float32Array, sourceRate: number): void =>
             ipcRenderer.send('audio:pushRendererAudio', interleavedLR, sourceRate),
         rendererAudioPortVersion: 1,
+        getAudioRouteTiming: (): Promise<import('./audio-route-timing').AudioRouteTiming> =>
+            ipcRenderer.invoke('audio:getAudioRouteTiming'),
         hasRendererAudioPort: (id: string): Promise<boolean> => ipcRenderer.invoke('audio:hasRendererAudioPort', id),
         closeRendererAudioPort: (id: string): Promise<boolean> => ipcRenderer.invoke('audio:closeRendererAudioPort', id),
         getRendererBusMetrics: (): Promise<{

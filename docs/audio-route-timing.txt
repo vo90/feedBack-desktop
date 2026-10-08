@@ -1,0 +1,50 @@
+Audio route timing diagnostics, schema version 1
+
+Read on demand from the desktop renderer:
+    await window.feedBackDesktop.audio.getAudioRouteTiming()
+
+This API observes the existing audio route. It does not open a device, start
+playback, log PCM, change buffering, or run an additional polling loop.
+
+Transport fields describe the requesting window's active worklet port only.
+captureId matches Core's window._rendererOutputRoute.captureId. captureEpoch
+changes when the main process accepts a new port. Counters reset at that point.
+packetsReceived/framesReceived count valid stereo packets received by the bridge,
+even when the native bus is disabled. They are not native-push acknowledgments.
+framesReceived is in source-rate frames; native bus frames may be resampled.
+
+lastSourcePacket contains sequence, firstFrame and exclusive endFrame from the
+capture AudioContext. These locate the worklet's capture-stage samples, not the
+original song/source generation time. packetsWithTiming indicates coverage;
+older Core versions still play normally without timing metadata. Invalid optional
+metadata is counted and ignored without dropping valid audio. discontinuities
+counts adjacent valid timing packets with non-contiguous sequence/frame positions
+or a rate change. It does not prove an audible dropout or detect silence upstream.
+
+attachedAtMs, lastReceivedAtMs, maxReceiptIntervalMs and sampledAtMs use the main
+process's monotonic performance clock. The source frames belong to a different
+clock. Do not subtract them to infer latency. sourceToReceiptMs and
+measuredEndToEndMs are null until a defensible measurement is available.
+
+rendererBus includes existing native queue occupancy, consumed/pushed frames,
+underflow and overflow counters. Those counters are native-engine lifetime totals,
+not capture-epoch totals; a disabled bus or new capture does not reset them.
+rendererBusControlEpoch counts accepted bridge disable commands, including repeat
+disables. It is not a hardware restart generation or acknowledgment of the native
+consumer's asynchronous flush. Core's routeEpoch instead marks successful route
+enable/recovery transactions. Neither establishes an atomic device boundary.
+
+device is the existing native device report (including actual block sizes).
+nativeLatencyEstimate exposes the existing getLatencyBreakdown report while the
+engine runs. Its rendererBusMs and splitRingMs are occupancy durations, not sample
+age. Its monitorTotalMs concerns the software monitor path, not backing playback;
+driver latency and buffer fields must not be summed into an end-to-end assertion.
+The legacy device.latencyMs is also an estimate. TV processing is unmeasured.
+
+These sequential reads are not atomic against the output callback. A missing
+addon/method or stopped engine yields null where unavailable. Failed reads add
+only method names to errors, keeping the remaining diagnostics usable.
+
+Remaining measurement work: correlate clocks with uncertainty, tag native
+consumption/presentation by route generation, and separate startup/recovery from
+steady state. This version provides evidence for that work, not a latency meter.

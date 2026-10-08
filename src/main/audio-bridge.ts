@@ -11,6 +11,7 @@ import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getS
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 import { readBackingSnapshot, createBackingClockPublisher } from './backing-clock';
 import { createRendererAudioPortBridge } from './renderer-audio-port';
+import { readAudioRouteTiming } from './audio-route-timing';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
@@ -961,6 +962,7 @@ export function initAudioBridge(): void {
 
     // ── Renderer-audio bus (Phase 2: WebAudio master → engine output) ────────
     const rendererPorts = createRendererAudioPortBridge((pcm, rate) => audio?.pushRendererAudio?.(pcm, rate));
+    let rendererBusControlEpoch = 0;
     const watchedAudioSenders = new WeakSet<Electron.WebContents>();
     ipcMain.on('audio:attachRendererAudioPort', (event, id: unknown) => {
         const port = event.ports[0];
@@ -989,6 +991,7 @@ export function initAudioBridge(): void {
             const en = enabled === true;
             const g = typeof gain === 'number' && Number.isFinite(gain) ? gain : 1.0;
             audio.setRendererBus(en, g);
+            if (!en) rendererBusControlEpoch++;
         }
     });
 
@@ -1007,6 +1010,8 @@ export function initAudioBridge(): void {
         if (!audio || typeof audio.getRendererBusMetrics !== 'function') return null;
         return audio.getRendererBusMetrics();
     });
+    ipcMain.handle('audio:getAudioRouteTiming', (event) =>
+        readAudioRouteTiming(audio, rendererPorts.snapshot(event.sender.id), rendererBusControlEpoch));
 
     ipcMain.handle('audio:getStreamSinkLevel', () => {
         if (!audio || typeof audio.getStreamSinkLevel !== 'function') return 0;

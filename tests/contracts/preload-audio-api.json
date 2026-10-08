@@ -8,6 +8,7 @@
     "closeRendererAudioPort",
     "debugEnabled",
     "detectNotes",
+    "getAudioRouteTiming",
     "getBackingDuration",
     "getBackingLevel",
     "getBackingPosition",
