@@ -596,6 +596,12 @@ export function initAudioBridge(): void {
     });
     ipcMain.handle('audio:saveCalibration', (_event, direction: 'input' | 'output', key: string, offsetMs: number) =>
         calibrations().save(direction, key, offsetMs));
+    ipcMain.handle('audio:setCalibrationMode', (_event, perOutputSetup: boolean, currentOffsetMs: number) => {
+        if (!audio?.isAudioRunning?.() || typeof audio?.loadBackingSession !== 'function') return null;
+        const device = audio.getCurrentDevice?.();
+        if (!calibrations().read(device).output || !calibrations().setPerOutputSetup(perOutputSetup, currentOffsetMs)) return null;
+        return calibrations().read(device, undefined, Number.isInteger(device.inputChannel) ? device.inputChannel : -1);
+    });
 
     ipcMain.handle('audio:saveDeviceSettings', (_event, settings: unknown) => writeAudioSettings(settings));
 

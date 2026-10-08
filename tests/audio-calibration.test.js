@@ -42,6 +42,53 @@ test(`native scoring separates 2ms input from ${av}ms output correction at ${rat
     assert.equal(resolveVerifierTiming(audio, 8, false, rate, timing).playing, false);
 });
 
+test('opting out shares one output value across routes and restart, preserving device and input profiles', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-calibration-mode-'));
+    const file = path.join(dir, 'profiles.json');
+    try {
+        let store = createCalibrationStore(file);
+        const asio = {type:'ASIO', input:'Interface', output:'Interface', sampleRate:48000, blockSize:128};
+        const tv = {...asio, outputType:'Windows Audio', output:'TV', outputBlockSize:480};
+        const a = store.read(asio), b = store.read(tv);
+        assert.equal(a.perOutputSetup, true, 'existing stores default to per-device mode');
+        store.save('output', a.output.key, -5);
+        store.save('output', b.output.key, -100);
+        store.save('input', a.input.key, 2);
+        assert.equal(store.setPerOutputSetup(false, -100), true);
+        assert.equal(store.read(asio).output.offsetMs, -100, 'no jump when opting out');
+        assert.equal(store.read(asio).output.key, store.read(tv).output.key);
+        assert.notEqual(store.read(asio).output.routeKey, store.read(tv).output.routeKey);
+        assert.equal(store.save('output', b.output.key, -300), false, 'late device save cannot change shared mode');
+        const sharedKey = store.read(tv).output.key;
+        assert.equal(store.save('output', sharedKey, -40), true);
+        store = createCalibrationStore(file);
+        assert.equal(store.read(asio).perOutputSetup, false);
+        assert.equal(store.read({...tv, output:'Headphones', outputBlockSize:960}).output.offsetMs, -40);
+        assert.equal(store.read(asio).input.offsetMs, 2);
+        assert.equal(store.setPerOutputSetup(true, -40), true);
+        assert.equal(store.read(asio).output.offsetMs, -5);
+        assert.equal(store.read(tv).output.offsetMs, -100);
+        assert.equal(store.save('output', sharedKey, -80), false, 'late shared save cannot change profiles');
+        assert.equal(store.setPerOutputSetup('false', 0), false);
+        assert.equal(store.setPerOutputSetup(false, Infinity), false);
+        assert.equal(store.read(tv).perOutputSetup, true);
+    } finally { fs.rmSync(dir, {recursive:true, force:true}); }
+});
+
+test('failed preference write retains the previous mode and calibration', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feedback-calibration-write-'));
+    const file = path.join(dir, 'profiles.json');
+    try {
+        const store = createCalibrationStore(file);
+        const device = {type:'ASIO', output:'Interface', sampleRate:48000, blockSize:128};
+        const before = store.read(device);
+        fs.mkdirSync(file + '.tmp'); // deterministic write failure, without changing OS permissions
+        assert.throws(() => store.setPerOutputSetup(false, -100));
+        assert.equal(store.read(device).perOutputSetup, true);
+        assert.equal(store.read(device).output.key, before.output.key);
+    } finally { fs.rmSync(dir, {recursive:true, force:true}); }
+});
+
 test('ambiguous names cannot persist a calibration onto an indistinguishable endpoint', () => {
     const device = {type: 'Windows Audio', output: 'Speakers', sampleRate: 48000, blockSize: 256, outputAmbiguous: true, routeGeneration: 1};
     const a = calibrationRoute(device, 'output');

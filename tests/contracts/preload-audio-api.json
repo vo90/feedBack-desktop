@@ -81,6 +81,7 @@
     "setBranch",
     "setBranchSrc",
     "setBypass",
+    "setCalibrationMode",
     "setChart",
     "setDevice",
     "setDeviceType",

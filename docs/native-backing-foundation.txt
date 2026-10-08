@@ -60,6 +60,14 @@ evidence and is not copied onto every native output. New native profiles start
 at zero residual with a clear recheck label. Existing input correction migrates
 only to the first input profile, also marked unchecked.
 
+The Audio page shows the actual output setup and active AV correction after
+Apply succeeds. Remember AV calibration per output setup defaults on. Turning
+it off starts a shared native-output value at the current correction; later
+changes save to that shared value. Turning it back on restores the current
+device's saved profile. All device profiles and input correction are preserved.
+The preference and shared value survive restart. Browser compatibility retains
+its separate calibration. Failed preference writes leave the prior mode active.
+
 Limits and validation
 ---------------------
 Sources: 1-32 mono/stereo files, 8-384 kHz, positive duration up to 24 hours.

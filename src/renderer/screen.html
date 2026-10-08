@@ -98,6 +98,24 @@
         </button>
     </div>
 
+    <!-- Output calibration follows the applied device, not pending dropdown edits. -->
+    <section class="mb-6 p-4 rounded-lg bg-slate-800/50 border border-slate-700" aria-labelledby="ae-av-heading">
+        <h3 id="ae-av-heading" class="text-lg font-semibold mb-3 text-slate-200">Audio / visual calibration</h3>
+        <label class="flex items-center gap-2 text-sm text-slate-200">
+            <input id="ae-av-remember" type="checkbox" checked disabled class="accent-emerald-500"
+                   aria-describedby="ae-av-help">
+            Remember AV calibration per output setup
+        </label>
+        <p id="ae-av-help" class="text-xs text-slate-400 mt-2">On: save separately for each output device, audio mode, sample rate and buffer size. Off: use one shared value across outputs. Your saved device values are kept.</p>
+        <p id="ae-av-route" class="text-sm text-slate-300 mt-3">Start audio and apply a device to view its calibration.</p>
+        <p id="ae-av-status" class="text-xs text-slate-400 mt-2" role="status" aria-live="polite"></p>
+        <label for="ae-av-offset" class="block text-sm text-slate-200 mt-3">AV correction: <span id="ae-av-value">0 ms</span></label>
+        <input id="ae-av-offset" type="range" min="-1000" max="1000" step="1" value="0" disabled
+               oninput="setAvOffsetMs(this.value)" class="w-full accent-emerald-500" aria-describedby="ae-av-direction">
+        <p id="ae-av-direction" class="text-xs text-slate-400 mt-2">If the highway is ahead of the sound, decrease this value. Changes save automatically. Input correction is separate.</p>
+        <p class="text-xs text-slate-400 mt-2">The active setup updates after Apply succeeds. Browser compatibility playback keeps its separate AV value.</p>
+    </section>
+
     <!-- Level Meters -->
     <div class="mb-6">
         <h3 class="text-lg font-semibold mb-3 text-slate-200">Levels</h3>

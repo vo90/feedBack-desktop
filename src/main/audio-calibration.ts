@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 type Profile = { offsetMs: number; checked: boolean };
-type Store = { version: 2; legacyAvMs?: number; output: Record<string, Profile>; input: Record<string, Profile> };
+type Store = { version: 2; legacyAvMs?: number; perOutputSetup?: boolean; sharedOutput?: Profile; output: Record<string, Profile>; input: Record<string, Profile> };
+const SHARED_OUTPUT_KEY = 'shared-output-v2';
 export function calibrationRoute(device: any, direction: 'input' | 'output', channel = -1) {
     if (!device) return null;
     const backend = device[direction + 'Type'] || device.type;
@@ -37,6 +38,9 @@ export function createCalibrationStore(filename: string) {
                 }
             }
             if (Number.isFinite(parsed.legacyAvMs)) store.legacyAvMs = parsed.legacyAvMs;
+            store.perOutputSetup = parsed.perOutputSetup !== false;
+            if (Number.isFinite(parsed.sharedOutput?.offsetMs) && Math.abs(parsed.sharedOutput.offsetMs) <= 1000)
+                store.sharedOutput = { offsetMs: parsed.sharedOutput.offsetMs, checked: parsed.sharedOutput.checked === true };
         }
     } catch (error: any) { if (error.code !== 'ENOENT') console.warn('[audio] Calibration settings unavailable:', error.message); }
     function persist(next: Store) {
@@ -54,14 +58,31 @@ export function createCalibrationStore(filename: string) {
             if (input?.persistent && !Object.keys(store.input).length && Number.isFinite(legacyInputMs)
                 && legacyInputMs! >= 0 && legacyInputMs! <= 250)
                 persist({ ...store, input: { [input.key]: { offsetMs: legacyInputMs!, checked: false } } });
-            return { version: 2, legacyAvMs: store.legacyAvMs,
-                output: output ? { ...output, ...(store.output[output.key] || { offsetMs: 0, checked: false }) } : null,
+            const perOutputSetup = store.perOutputSetup !== false;
+            return { version: 2, legacyAvMs: store.legacyAvMs, perOutputSetup,
+                output: output ? { ...output, routeKey: output.key,
+                    ...(perOutputSetup ? (store.output[output.key] || { offsetMs: 0, checked: false })
+                        : { key: SHARED_OUTPUT_KEY, persistent: true, ...(store.sharedOutput || { offsetMs: 0, checked: false }) }) } : null,
                 input: input ? { ...input, ...(store.input[input.key] || { offsetMs: 80, checked: false }) } : null };
+        },
+        setPerOutputSetup(enabled: boolean, currentOffsetMs: number) {
+            if (typeof enabled !== 'boolean' || !Number.isFinite(currentOffsetMs) || Math.abs(currentOffsetMs) > 1000) return false;
+            if ((store.perOutputSetup !== false) === enabled) return true;
+            // Start shared mode at the currently heard value; retain every device
+            // profile so opting back in restores it. Input correction is untouched.
+            persist({ ...store, perOutputSetup: enabled,
+                ...(!enabled ? { sharedOutput: { offsetMs: currentOffsetMs, checked: true } } : {}) });
+            return true;
         },
         save(direction: 'input' | 'output', key: string, offsetMs: number) {
             if (!['input', 'output'].includes(direction) || typeof key !== 'string' || key.length > 4096
                 || !Number.isFinite(offsetMs) || offsetMs < (direction === 'output' ? -1000 : 0)
                 || offsetMs > (direction === 'output' ? 1000 : 250)) return false;
+            if (direction === 'output' && store.perOutputSetup === false) {
+                if (key !== SHARED_OUTPUT_KEY) return false;
+                persist({ ...store, sharedOutput: { offsetMs, checked: true } });
+                return true;
+            }
             // Only keys built from a resolved route are accepted, never arbitrary
             // object properties supplied by a renderer.
             let parts; try { parts = JSON.parse(key); } catch { return false; }

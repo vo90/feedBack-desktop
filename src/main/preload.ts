@@ -526,6 +526,7 @@ const feedBackDesktopApi = {
         loadBackingTrack: (filePath: string) => ipcRenderer.invoke('audio:loadBackingTrack', filePath),
         getCalibration: (legacyAvMs?: number, channel = -1, legacyInputMs?: number) => ipcRenderer.invoke('audio:getCalibration', legacyAvMs, channel, legacyInputMs),
         saveCalibration: (direction: 'input' | 'output', key: string, offsetMs: number) => ipcRenderer.invoke('audio:saveCalibration', direction, key, offsetMs),
+        setCalibrationMode: (perOutputSetup: boolean, currentOffsetMs: number) => ipcRenderer.invoke('audio:setCalibrationMode', perOutputSetup, currentOffsetMs),
         backingSessionCapabilities: () => ipcRenderer.invoke('audio:backingSessionCapabilities'),
         loadBackingSession: (paths: string[], gains: number[], fullMixLast = false) => ipcRenderer.invoke('audio:loadBackingSession', paths, gains, fullMixLast),
         setBackingSourceGains: (gains: number[]) => ipcRenderer.invoke('audio:setBackingSourceGains', gains),

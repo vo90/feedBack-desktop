@@ -86,6 +86,7 @@
   "audio:setBranch",
   "audio:setBranchSrc",
   "audio:setBypass",
+  "audio:setCalibrationMode",
   "audio:setChart",
   "audio:setDevice",
   "audio:setDeviceType",
