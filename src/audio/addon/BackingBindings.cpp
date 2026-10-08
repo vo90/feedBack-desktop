@@ -79,6 +79,21 @@ Napi::Value GetBackingSnapshot(const Napi::CallbackInfo& info)
     result.Set("rate", s.rate);
     result.Set("playing", s.playing);
     result.Set("ended", s.ended);
+    auto render = Napi::Object::New(env);
+    render.Set("version", 1);
+    render.Set("valid", s.valid && s.render.valid);
+    render.Set("routeGeneration", static_cast<double>(s.render.routeGeneration));
+    render.Set("startedAgeMs", juce::jmax(0.0, juce::Time::getMillisecondCounterHiRes() - s.render.startedAtMs));
+    render.Set("sourcePositionAfterRender", s.render.sourcePositionAfterRender);
+    render.Set("sampleRate", s.render.sampleRate);
+    render.Set("frames", s.render.frames);
+    // The driver report already includes backend-specific buffering. Do not
+    // blindly add another callback period or any input/monitor-ring estimate.
+    render.Set("reportedOutputLatencyFrames", s.render.outputLatencyFrames);
+    render.Set("stretchInputLatencyFrames", s.render.stretchInputLatencyFrames);
+    render.Set("stretchOutputLatencyFrames", s.render.stretchOutputLatencyFrames);
+    render.Set("timestampMeaning", "backing-render-start");
+    result.Set("renderTiming", render);
     return result;
 }
 

@@ -21,6 +21,9 @@ int main() {
     }
     slopsmith::EngineState state;
     slopsmith::BackingPlayer player(state);
+    player.prepare(48000, 256);
+    player.invalidateOutputTiming();
+    assert(!player.getClockSnapshot().valid); // no fabricated track before load
     assert(player.load(fixture.getFile()));
     auto loaded = player.getClockSnapshot();
     assert(loaded.valid && loaded.position == 0 && !loaded.playing && !loaded.ended);
@@ -36,11 +39,18 @@ int main() {
     auto advancing = block();
     assert(advancing.valid && advancing.sequence > started.sequence && advancing.position > 0);
     assert(advancing.sampledAtMs >= started.sampledAtMs);
+    assert(advancing.render.valid && advancing.render.frames == 256);
+    assert(advancing.render.sampleRate == 48000 && advancing.render.outputLatencyFrames == -1);
+    assert(advancing.render.stretchInputLatencyFrames == 0 && advancing.render.stretchOutputLatencyFrames == 0);
+    assert(advancing.render.sourcePositionAfterRender == advancing.position);
+    assert(advancing.render.startedAtMs <= advancing.sampledAtMs);
     state.currentSampleRate.store(44100);
-    player.prepare(44100, 256);
+    player.prepare(44100, 256, 512);
     const auto reconfigured = player.getClockSnapshot();
     assert(reconfigured.valid && reconfigured.generation > advancing.generation);
     assert(reconfigured.position == advancing.position && reconfigured.playing);
+    assert(!reconfigured.render.valid && reconfigured.render.outputLatencyFrames == 512);
+    assert(reconfigured.render.routeGeneration > advancing.render.routeGeneration);
     assert(block().position > reconfigured.position);
     player.setPosition(.5);
     auto sought = player.getClockSnapshot();
@@ -48,10 +58,17 @@ int main() {
     player.setSpeed(.5);
     auto slow = block();
     assert(slow.rate == .5 && slow.generation > sought.generation);
+    assert(slow.render.valid && slow.render.stretchInputLatencyFrames > 0 && slow.render.stretchOutputLatencyFrames > 0);
+    assert(slow.render.outputLatencyFrames == 512); // no extra buffer period added
     player.stop();
     auto stopped = player.getClockSnapshot();
     assert(!stopped.playing && !stopped.ended && stopped.generation > slow.generation);
-    const auto frozenSequence = stopped.sequence;
+    assert(!stopped.render.valid);
+    player.invalidateOutputTiming();
+    const auto outputStopped = player.getClockSnapshot();
+    assert(!outputStopped.render.valid && outputStopped.render.outputLatencyFrames == -1);
+    assert(outputStopped.render.routeGeneration > stopped.render.routeGeneration);
+    const auto frozenSequence = outputStopped.sequence;
     juce::Thread::sleep(5);
     assert(player.getClockSnapshot().sequence == frozenSequence);
     player.setPosition(.99); player.start();

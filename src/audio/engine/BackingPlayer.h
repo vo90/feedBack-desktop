@@ -57,7 +57,8 @@ public:
     // Re-prepare the transport + stretcher + buffers at a (new) device format.
     // Call from the about-to-start hook that owns backing playback (duplex:
     // input manager; split: output manager). No-op when nothing is loaded.
-    void prepare(double sr, int bs);
+    void prepare(double sr, int bs, int reportedOutputLatencyFrames = -1);
+    void invalidateOutputTiming();
 
     // ── RT primitives (output callbacks) ──────────────────────────────────
     // Usage pattern (unchanged from the open-coded version):
@@ -80,6 +81,7 @@ private:
     void stopNoLock();
     void publishClockLocked();
     BackingClockSnapshot clockSnapshot;
+    BackingRenderObservation renderObservation; // protected by existing lock
     std::uint64_t clockGeneration = 0; // protected by lock, including RT writes
     bool ended = false;                // protected by lock
 

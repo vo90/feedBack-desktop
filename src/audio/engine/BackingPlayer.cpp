@@ -12,13 +12,14 @@ namespace slopsmith {
 void BackingPlayer::publishClockLocked()
 {
     clockSnapshot.publish(cachedPosition.load(), juce::Time::getMillisecondCounterHiRes(),
-                          speed.load(), clockGeneration, playing.load(), ended);
+                          speed.load(), clockGeneration, playing.load(), ended, renderObservation);
 }
 
 bool BackingPlayer::load(const juce::File& file)
 {
     const juce::ScopedLock sl(lock);
     stopNoLock();
+    renderObservation.valid = false;
     ended = false;
     transport.reset();
     readerSource.reset();
@@ -128,6 +129,7 @@ void BackingPlayer::setPosition(double seconds)
     if (transport)
     {
         transport->setPosition(seconds);
+        renderObservation.valid = false;
         stretch.reset();
         // Read back the actual position; the transport may clamp (e.g. negative or past EOF).
         const double pos = transport->getCurrentPosition();
@@ -145,6 +147,7 @@ void BackingPlayer::start()
     if (transport)
     {
         transport->start();
+        renderObservation.valid = false;
         playing.store(true);
         ended = false;
         heardPositionSec.store(transport->getCurrentPosition(),
@@ -159,6 +162,7 @@ void BackingPlayer::stopNoLock()
     if (transport)
     {
         transport->stop();
+        renderObservation.valid = false;
         stretch.reset();
         playing.store(false);
         ++clockGeneration;
@@ -207,9 +211,13 @@ void BackingPlayer::setSpeed(double newSpeed)
     speedChangePending.store(true, std::memory_order_release);
 }
 
-void BackingPlayer::prepare(double sr, int bs)
+void BackingPlayer::prepare(double sr, int bs, int reportedOutputLatencyFrames)
 {
     const juce::ScopedLock sl(lock);
+    renderObservation.valid = false;
+    ++renderObservation.routeGeneration;
+    renderObservation.sampleRate = sr > 0 && std::isfinite(sr) ? sr : 0;
+    renderObservation.outputLatencyFrames = reportedOutputLatencyFrames >= 0 ? reportedOutputLatencyFrames : -1;
     if (transport && sr > 0.0 && bs > 0)
     {
         // See load() for why prepareToPlay uses maxInputFrames rather than bs:
@@ -227,8 +235,19 @@ void BackingPlayer::prepare(double sr, int bs)
     }
 }
 
+void BackingPlayer::invalidateOutputTiming()
+{
+    const juce::ScopedLock sl(lock);
+    renderObservation.valid = false;
+    renderObservation.outputLatencyFrames = -1;
+    ++renderObservation.routeGeneration;
+    if (transport) publishClockLocked();
+}
+
 int BackingPlayer::renderBlockLocked(int numSamples)
 {
+    // Start of BACKING rendering, not callback entry or physical presentation.
+    const double renderStartedAt = juce::Time::getMillisecondCounterHiRes();
     // Adopt any speed change requested since the last block (set lock-free by
     // setSpeed). Common (no-change) path is a plain acquire load — no locked
     // RMW, so the flag's cache line stays shared and isn't bounced to this
@@ -331,6 +350,13 @@ int BackingPlayer::renderBlockLocked(int numSamples)
         playing.store(false);
         ended = true;
     }
+    renderObservation.valid = outSamples > 0 && sr > 0;
+    renderObservation.startedAtMs = renderStartedAt;
+    renderObservation.sourcePositionAfterRender = heardPositionSec.load(std::memory_order_relaxed);
+    renderObservation.sampleRate = sr;
+    renderObservation.frames = outSamples;
+    renderObservation.stretchInputLatencyFrames = bypassStretch ? 0 : stretch.inputLatency();
+    renderObservation.stretchOutputLatencyFrames = bypassStretch ? 0 : stretch.outputLatency();
     publishClockLocked();
 
     // Normalize the backing track to a consistent target loudness (-12 LUFS)

@@ -786,11 +786,12 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
     // plays on, and pulls from backingTransport at the output device's
     // block size.
     if (duplexMode.load(std::memory_order_relaxed))
-        backing.prepare(sr, bs);
+        backing.prepare(sr, bs, device->getOutputLatencyInSamples());
 }
 
 void AudioEngine::audioDeviceStopped()
 {
+    if (duplexMode.load(std::memory_order_relaxed)) backing.invalidateOutputTiming();
     // JUCE calls audioDeviceStopped() only AFTER the PRIMARY input device has
     // stopped invoking its IO callback (stop() blocks for the callback thread to
     // finish), so the primary body is quiescent here. We release ONLY deviceKey-0
@@ -869,14 +870,15 @@ void AudioEngine::audioOutputAboutToStart(juce::AudioIODevice* device)
     if (sr > 0.0) currentSampleRate.store(sr, std::memory_order_relaxed);
     // The output device drives backing playback in split mode, so this is
     // where the stretcher gets sized for that side.
-    backing.prepare(sr, bs);
+    backing.prepare(sr, bs, device->getOutputLatencyInSamples());
 }
 
 void AudioEngine::audioOutputStopped()
 {
+    backing.invalidateOutputTiming();
     if (slopsmith_vst_trace::isEnabled())
         fprintf(stderr, "[diag] audioOutputStopped\n");
-    // No-op by design. The consumer's catch-up branch in audioOutputCallback
+    // Leave the monitor ring alone. Its catch-up branch in audioOutputCallback
     // handles both (w - r) > cap (producer lapped during the stop) and
     // w < r (a future reset race) on the next output start, so we don't
     // need to reset readIndex here. Resetting r to 0 while the producer

@@ -24,13 +24,17 @@ test('snapshot capability is null before engine load and for downlevel addons', 
 });
 test('snapshot IPC preserves the native observation and brackets its read in the main clock', () => {
     const sample = {version: 1, valid: true, position: 42, ageMs: 3.5,
-        sequence: 7, generation: 2, rate: .5, playing: true, ended: false};
+        sequence: 7, generation: 2, rate: .5, playing: true, ended: false,
+        renderTiming: {version: 1, valid: true, routeGeneration: 3,
+            frames: 256, sampleRate: 48000, reportedOutputLatencyFrames: 512,
+            startedAgeMs: 4, timestampMeaning: 'backing-render-start'}};
     let calls = 0;
     const readings = [100, 104];
     const result = read({getBackingSnapshot() { calls++; return sample; }},
         {now: () => readings.shift(), timeOrigin: 5000});
     assert.deepEqual(result, {...sample, clockId: 5000, readAtMs: 102, readUncertaintyMs: 2});
     assert.equal(sample.readAtMs, undefined, 'the native payload is not modified');
+    assert.equal(result.renderTiming, sample.renderTiming, 'render diagnostics preserve their timestamp meaning');
     assert.equal(calls, 1);
 });
 

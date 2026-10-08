@@ -30,8 +30,20 @@ target_compile_features(backing_clock_snapshot_test PRIVATE cxx_std_17)
 target_link_libraries(backing_clock_snapshot_test PRIVATE Threads::Threads)
 add_test(NAME backing_clock_snapshot COMMAND backing_clock_snapshot_test)
 
+add_executable(backing_sources_test backing_sources_test.cpp)
+target_compile_features(backing_sources_test PRIVATE cxx_std_17)
+target_link_libraries(backing_sources_test PRIVATE Threads::Threads)
+add_test(NAME backing_sources COMMAND backing_sources_test)
+
 # Available in the full addon build; the standalone pure-helper harness has no JUCE.
 if(TARGET juce::juce_audio_formats)
+    add_executable(prepared_backing_sources_test prepared_backing_sources_test.cpp
+        ../../src/audio/engine/PreparedBackingSources.cpp)
+    target_compile_features(prepared_backing_sources_test PRIVATE cxx_std_20)
+    target_compile_definitions(prepared_backing_sources_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(prepared_backing_sources_test PRIVATE
+        juce::juce_audio_formats juce::juce_audio_basics)
+    add_test(NAME prepared_backing_sources COMMAND prepared_backing_sources_test)
     add_executable(device_probe_test device_probe_test.cpp
         ../../src/audio/engine/DeviceSetup.cpp)
     target_compile_features(device_probe_test PRIVATE cxx_std_20)

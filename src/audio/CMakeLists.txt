@@ -8,6 +8,7 @@ set(AUDIO_SOURCES
     AudioEngine.cpp
     engine/StreamSink.cpp
     engine/BackingPlayer.cpp
+    engine/PreparedBackingSources.cpp
     engine/DeviceSetup.cpp
     engine/SourcePool.cpp
     engine/ExtraInputs.cpp
