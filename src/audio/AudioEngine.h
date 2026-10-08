@@ -207,11 +207,18 @@ public:
     // Backing track — transport moved to engine/BackingPlayer (TLC phase 3);
     // the volume fader + level meter stay engine-side (mix policy).
     void setBackingVolume(float vol) { backingVolume.store(slopsmith::sanitizeMasterGain(vol)); }
+    float getBackingVolume() const { return backingVolume.load(); }
     bool loadBackingTrack(const juce::File& file)
     {
         currentBackingLevel.store(0.0f);
         return backing.load(file);
     }
+    std::uint64_t beginBackingSession(const std::vector<juce::File>& files, const std::vector<float>& gains, bool fullMixLast = false)
+    { return backing.beginLoad(files, gains, fullMixLast); }
+    std::uint64_t beginBackingSeek(double position) { return backing.beginSeek(position); }
+    std::uint64_t beginBackingRate(double rate) { return backing.beginRate(rate); }
+    bool waitForBackingRequest(std::uint64_t id) { return backing.waitForRequest(id); }
+    bool setBackingSourceGains(const std::vector<float>& gains) { return backing.setSourceGains(gains); }
     void setBackingPosition(double seconds) { backing.setPosition(seconds); }
     void startBacking() { backing.start(); }
     void stopBacking()
@@ -224,6 +231,7 @@ public:
     bool isBackingPlaying() const { return backing.isPlaying(); }
     double getBackingPosition() const { return backing.getPosition(); }
     slopsmith::BackingClockSample getBackingSnapshot() const { return backing.getClockSnapshot(); }
+    slopsmith::BackingAnalysis::Snapshot getBackingAnalysis() const { return backing.getAnalysis(); }
     double getBackingDuration() const { return backing.getDuration(); }
 
     // Metering (read from any thread — atomic). Input level/peak are per-source

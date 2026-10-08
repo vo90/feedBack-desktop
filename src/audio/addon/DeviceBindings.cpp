@@ -195,9 +195,19 @@ Napi::Value GetCurrentDevice(const Napi::CallbackInfo& info)
     obj.Set("sampleRate", liveEngine->getCurrentSampleRate());
     obj.Set("blockSize", liveEngine->getCurrentBlockSize());
     obj.Set("inputBlockSize", liveEngine->getCurrentInputBlockSize());
+    obj.Set("inputChannel", liveEngine->getInputChannel());
     obj.Set("outputBlockSize", liveEngine->getCurrentOutputBlockSize());
     obj.Set("latencyMs", liveEngine->getLatencyMs());
     obj.Set("duplex", liveEngine->isDuplex());
+    obj.Set("routeGeneration", static_cast<double>(liveEngine->getBackingSnapshot().render.routeGeneration));
+    // Cached enumeration only: identifying calibration must never open a probe
+    // or compete with the live ASIO device.
+    for (const auto& type : liveEngine->getDeviceTypes()) {
+        if (type.name.toStdString() == inputType)
+            obj.Set("inputAmbiguous", std::count(type.inputDevices.begin(), type.inputDevices.end(), liveEngine->getCurrentInputDevice()) > 1);
+        if (type.name.toStdString() == outputType)
+            obj.Set("outputAmbiguous", std::count(type.outputDevices.begin(), type.outputDevices.end(), liveEngine->getCurrentOutputDevice()) > 1);
+    }
     return obj;
 }
 

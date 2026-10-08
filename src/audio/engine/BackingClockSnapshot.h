@@ -11,6 +11,7 @@ struct BackingRenderObservation {
     bool valid = false;
     std::uint64_t routeGeneration = 0;
     double startedAtMs = 0, sourcePositionAfterRender = 0, sampleRate = 0;
+    double firstFramePosition = 0;
     int frames = 0, outputLatencyFrames = -1;
     int stretchInputLatencyFrames = 0, stretchOutputLatencyFrames = 0;
 };
@@ -19,7 +20,7 @@ struct BackingClockSample {
     bool valid = false;
     double position = 0, sampledAtMs = 0, rate = 1;
     std::uint64_t sequence = 0, generation = 0;
-    bool playing = false, ended = false;
+    bool playing = false, ended = false, failed = false;
     BackingRenderObservation render;
 };
 
@@ -38,13 +39,14 @@ public:
 
     void publish(double position, double sampledAtMs, double rate,
                  std::uint64_t generation, bool playing, bool ended,
-                 const BackingRenderObservation& render = {}) noexcept {
+                 const BackingRenderObservation& render = {}, bool failed = false) noexcept {
         const auto version = sequence_.load();
         sequence_.store(version + 1);
         position_.store(position); sampledAtMs_.store(sampledAtMs); rate_.store(rate);
-        generation_.store(generation); flags_.store((playing ? 1u : 0u) | (ended ? 2u : 0u));
+        generation_.store(generation); flags_.store((playing ? 1u : 0u) | (ended ? 2u : 0u) | (failed ? 4u : 0u));
         renderValid_.store(render.valid); routeGeneration_.store(render.routeGeneration);
         renderStarted_.store(render.startedAtMs); sourcePosition_.store(render.sourcePositionAfterRender);
+        firstFramePosition_.store(render.firstFramePosition);
         sampleRate_.store(render.sampleRate); renderFrames_.store(render.frames);
         outputLatency_.store(render.outputLatencyFrames);
         stretchInputLatency_.store(render.stretchInputLatencyFrames);
@@ -62,12 +64,14 @@ public:
             s.render.valid = renderValid_.load(); s.render.routeGeneration = routeGeneration_.load();
             s.render.startedAtMs = renderStarted_.load(); s.render.sourcePositionAfterRender = sourcePosition_.load();
             s.render.sampleRate = sampleRate_.load(); s.render.frames = renderFrames_.load();
+            s.render.firstFramePosition = firstFramePosition_.load();
             s.render.outputLatencyFrames = outputLatency_.load();
             s.render.stretchInputLatencyFrames = stretchInputLatency_.load();
             s.render.stretchOutputLatencyFrames = stretchOutputLatency_.load();
             if (before != sequence_.load()) continue;
             s.valid = true; s.sequence = before / 2;
             s.playing = (flags & 1) != 0; s.ended = (flags & 2) != 0;
+            s.failed = (flags & 4) != 0;
             return s;
         }
         // The caller discards an unavailable observation; never spin waiting
@@ -82,6 +86,7 @@ private:
     std::atomic<bool> renderValid_{false};
     std::atomic<std::uint64_t> routeGeneration_{0};
     std::atomic<double> renderStarted_{0}, sourcePosition_{0}, sampleRate_{0};
+    std::atomic<double> firstFramePosition_{0};
     std::atomic<int> renderFrames_{0}, outputLatency_{-1}, stretchInputLatency_{0}, stretchOutputLatency_{0};
 };
 } // namespace slopsmith

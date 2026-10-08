@@ -32,6 +32,8 @@ import type { ConfigPathCategories } from './config-paths';
 type BackingSnapshot = {
     version: 1; valid: boolean; position: number; ageMs: number;
     sequence: number; generation: number; rate: number; playing: boolean; ended: boolean;
+    failed?: boolean;
+    presentation?: { version: 2; position: number; ageMs: number; playing: boolean; routeGeneration: number; latencyKnown: boolean };
     clockId?: number; readAtMs?: number; readUncertaintyMs?: number;
 };
 let backingSnapshotToken = 0;
@@ -390,8 +392,8 @@ const feedBackDesktopApi = {
         // renderer's unified, already-corrected playhead — the verifier scores
         // against this rather than the JUCE backing transport (frozen for
         // HTML5-routed sloppak songs). Pass them every detect tick.
-        getNoteVerdicts: (songTime?: number, playing?: boolean, playbackRate?: number): Promise<NoteVerdict[] | null> =>
-            ipcRenderer.invoke('audio:getNoteVerdicts', songTime, playing, playbackRate),
+        getNoteVerdicts: (songTime?: number, playing?: boolean, playbackRate?: number, timing?: unknown): Promise<NoteVerdict[] | null> =>
+            ipcRenderer.invoke('audio:getNoteVerdicts', songTime, playing, playbackRate, timing),
 
         // Raw polyphonic transcription — the ML note detector's full
         // active-pitch set. Resolves null when the ML detector isn't active
@@ -473,8 +475,8 @@ const feedBackDesktopApi = {
             ipcRenderer.invoke('audio:setSourceChart', id, chart),
         scoreSourceChord: (id: number, ctx: ChordScoreRequest): Promise<ChordScoreResult | null> =>
             ipcRenderer.invoke('audio:scoreSourceChord', id, ctx),
-        getSourceNoteVerdicts: (id: number, songTime?: number, playing?: boolean, playbackRate?: number): Promise<NoteVerdict[] | null> =>
-            ipcRenderer.invoke('audio:getSourceNoteVerdicts', id, songTime, playing, playbackRate),
+        getSourceNoteVerdicts: (id: number, songTime?: number, playing?: boolean, playbackRate?: number, timing?: unknown): Promise<NoteVerdict[] | null> =>
+            ipcRenderer.invoke('audio:getSourceNoteVerdicts', id, songTime, playing, playbackRate, timing),
         getSourceRawAudioFrame: (id: number, numSamples?: number): Promise<Float32Array> =>
             ipcRenderer.invoke('audio:getSourceRawAudioFrame', id, numSamples),
         getSourcePitchDetection: (id: number) =>
@@ -522,11 +524,17 @@ const feedBackDesktopApi = {
 
         // Backing track
         loadBackingTrack: (filePath: string) => ipcRenderer.invoke('audio:loadBackingTrack', filePath),
+        getCalibration: (legacyAvMs?: number, channel = -1, legacyInputMs?: number) => ipcRenderer.invoke('audio:getCalibration', legacyAvMs, channel, legacyInputMs),
+        saveCalibration: (direction: 'input' | 'output', key: string, offsetMs: number) => ipcRenderer.invoke('audio:saveCalibration', direction, key, offsetMs),
+        backingSessionCapabilities: () => ipcRenderer.invoke('audio:backingSessionCapabilities'),
+        loadBackingSession: (paths: string[], gains: number[], fullMixLast = false) => ipcRenderer.invoke('audio:loadBackingSession', paths, gains, fullMixLast),
+        setBackingSourceGains: (gains: number[]) => ipcRenderer.invoke('audio:setBackingSourceGains', gains),
         startBacking: () => ipcRenderer.invoke('audio:startBacking'),
         stopBacking: () => ipcRenderer.invoke('audio:stopBacking'),
         seekBacking: (seconds: number) => ipcRenderer.invoke('audio:seekBacking', seconds),
         getBackingPosition: (): Promise<number> => ipcRenderer.invoke('audio:getBackingPosition'),
         getBackingSnapshot: (): Promise<BackingSnapshot | null> => ipcRenderer.invoke('audio:getBackingSnapshot'),
+        getBackingAnalysis: (): Promise<Float32Array | null> => ipcRenderer.invoke('audio:getBackingAnalysis'),
         subscribeBackingSnapshots: (callback: (snapshot: BackingSnapshot) => void): (() => void) => {
             const token = ++backingSnapshotToken;
             let active = true;

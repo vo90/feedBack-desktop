@@ -1,5 +1,6 @@
 #pragma once
 #include "InputRingReader.h"
+#include "InputCaptureClock.h"
 #include "NoiseGate.h"
 #include "TonePolish.h"
 #include "SignalChain.h"
@@ -197,6 +198,7 @@ public:
     std::vector<float> getInputFrame(int numSamples = 4096) const override;
     uint64_t getInputSince(uint64_t fromIndex, std::vector<float>& out) const override;
     double getCurrentSampleRate() const override { return sampleRate.load(std::memory_order_relaxed); }
+    std::optional<double> inputReceiptTimeFor(uint64_t index) const override { return inputCaptureClock.timeFor(index, getCurrentSampleRate()); }
 
 private:
     // ML-backed chord scoring against the MlNoteDetector's active-pitch set.
@@ -241,6 +243,7 @@ private:
     static_assert((kInputFrameRingCapacity & (kInputFrameRingCapacity - 1)) == 0,
                   "kInputFrameRingCapacity must be a power of two");
     std::array<std::atomic<float>, kInputFrameRingCapacity> inputFrameRing{};
+    InputCaptureClock inputCaptureClock;
     std::atomic<uint64_t> inputFrameRingWriteIndex{0};
 
     static constexpr int kRawAudioRingCapacity = 16384;

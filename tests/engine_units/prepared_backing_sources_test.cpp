@@ -164,6 +164,12 @@ int main() {
         const auto a = consume(differentLengths, {0, 1});
         assert(a.size() == frames);
         for (int i = 0; i < frames; ++i) assert(std::abs(a[i] - (i < 1000 ? .125f : 0)) < 1e-6f);
+        Sources wrongFullMix({fullFile, shortFile}, 48000, 0, 4096, true);
+        awaitPrepared(wrongFullMix); assert(wrongFullMix.state() == Sources::State::failed);
+        Sources alignedFullMix({fullFile, fullFile}, 48000, 0, 4096, true);
+        const auto b = consume(alignedFullMix, {0, 1});
+        assert(b.size() == full.size());
+        for (unsigned i = 0; i < b.size(); ++i) assert(std::abs(b[i] - full[i]) < 1e-6f);
     }
     {
         Sources missing({fullFile, directory.getChildFile("missing.wav")}, 48000);

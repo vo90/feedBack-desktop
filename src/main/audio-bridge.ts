@@ -12,10 +12,16 @@ import { createAudioEffectsExecutor } from './audio-effects-executor';
 import { readBackingSnapshot, createBackingClockPublisher } from './backing-clock';
 import { createRendererAudioPortBridge } from './renderer-audio-port';
 import { readAudioRouteTiming } from './audio-route-timing';
+import { resolveVerifierTiming } from './verifier-timing';
+import { createCalibrationStore } from './audio-calibration';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
 
 let audio: AudioModule | null = null;
+let calibrationStore: ReturnType<typeof createCalibrationStore> | null = null;
+function calibrations() {
+    return calibrationStore ??= createCalibrationStore(path.join(app.getPath('userData'), 'slopsmith-audio-calibration.json'));
+}
 
 type AudioDeviceSettings = {
     type: string;          // legacy alias = inputType when only type was stored
@@ -583,6 +589,13 @@ export function initAudioBridge(): void {
     });
 
     ipcMain.handle('audio:loadDeviceSettings', () => readAudioSettings());
+    ipcMain.handle('audio:getCalibration', (_event, legacyAvMs?: number, channel = -1, legacyInputMs?: number) => {
+        if (!audio?.isAudioRunning?.() || typeof audio?.loadBackingSession !== 'function') return null;
+        const device = audio.getCurrentDevice?.();
+        return calibrations().read(device, legacyAvMs, Number.isInteger(device?.inputChannel) ? device.inputChannel : (Number.isInteger(channel) ? channel : -1), legacyInputMs);
+    });
+    ipcMain.handle('audio:saveCalibration', (_event, direction: 'input' | 'output', key: string, offsetMs: number) =>
+        calibrations().save(direction, key, offsetMs));
 
     ipcMain.handle('audio:saveDeviceSettings', (_event, settings: unknown) => writeAudioSettings(settings));
 
@@ -839,12 +852,13 @@ export function initAudioBridge(): void {
     // The optional (songTime, playing) args push the renderer's unified
     // playhead — the plugin calls this once per detect tick, so the push rides
     // the same IPC as the drain.
-    ipcMain.handle('audio:getNoteVerdicts', (_event, songTime: unknown, playing: unknown, playbackRate?: unknown) => {
+    ipcMain.handle('audio:getNoteVerdicts', (_event, songTime: unknown, playing: unknown, playbackRate?: unknown, timing?: unknown) => {
         if (!audio || typeof audio.getNoteVerdicts !== 'function') return null;
         try {
             if (typeof songTime === 'number' && Number.isFinite(songTime)
                 && typeof playing === 'boolean') {
-                return audio.getNoteVerdicts(songTime, playing, playbackRate);
+                const ref = resolveVerifierTiming(audio, songTime, playing, playbackRate, timing);
+                return audio.getNoteVerdicts(ref.songTime, ref.playing, ref.rate);
             }
             return audio.getNoteVerdicts();
         } catch (e: unknown) {
@@ -1112,13 +1126,14 @@ export function initAudioBridge(): void {
         }
     });
 
-    ipcMain.handle('audio:getSourceNoteVerdicts', (_event, id: unknown, songTime: unknown, playing: unknown, playbackRate?: unknown) => {
+    ipcMain.handle('audio:getSourceNoteVerdicts', (_event, id: unknown, songTime: unknown, playing: unknown, playbackRate?: unknown, timing?: unknown) => {
         if (!audio || typeof audio.getSourceNoteVerdicts !== 'function') return null;
         if (!validSourceId(id)) return null;
         try {
             if (typeof songTime === 'number' && Number.isFinite(songTime)
                 && typeof playing === 'boolean') {
-                return audio.getSourceNoteVerdicts(id, songTime, playing, playbackRate);
+                const ref = resolveVerifierTiming(audio, songTime, playing, playbackRate, timing);
+                return audio.getSourceNoteVerdicts(id, ref.songTime, ref.playing, ref.rate);
             }
             return audio.getSourceNoteVerdicts(id);
         } catch (e: unknown) {
@@ -1353,18 +1368,35 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:loadBackingTrack', (_event, filePath: string) => {
         return audio?.loadBackingTrack(filePath) ?? false;
     });
+    ipcMain.handle('audio:backingSessionCapabilities', () => ({
+        version: typeof audio?.loadBackingSession === 'function' && typeof audio?.setBackingSourceGains === 'function' ? 2 : 0,
+        maxSources: 32,
+    }));
+    ipcMain.handle('audio:loadBackingSession', (_event, paths: unknown, gains: unknown, fullMixLast = false) => {
+        if (!Array.isArray(paths) || paths.length === 0 || paths.length > 32
+            || paths.some(p => typeof p !== 'string' || !path.isAbsolute(p))
+            || typeof fullMixLast !== 'boolean' || !Array.isArray(gains) || gains.length !== paths.length
+            || gains.some(g => typeof g !== 'number' || !Number.isFinite(g) || g < 0 || g > 2)) return false;
+        return audio?.loadBackingSession?.(paths, gains, fullMixLast) ?? false;
+    });
+    ipcMain.handle('audio:setBackingSourceGains', (_event, gains: unknown) => {
+        if (!Array.isArray(gains) || !gains.length || gains.length > 32
+            || gains.some(g => typeof g !== 'number' || !Number.isFinite(g) || g < 0 || g > 2)) return false;
+        return audio?.setBackingSourceGains?.(gains) ?? false;
+    });
 
     ipcMain.handle('audio:startBacking', () => audio?.startBacking());
     ipcMain.handle('audio:stopBacking', () => audio?.stopBacking());
     ipcMain.handle('audio:seekBacking', (_event, seconds: number) => audio?.seekBacking(seconds));
     ipcMain.handle('audio:getBackingPosition', () => audio?.getBackingPosition() ?? 0);
     ipcMain.handle('audio:getBackingSnapshot', () => readBackingSnapshot(audio));
+    ipcMain.handle('audio:getBackingAnalysis', () => audio?.getBackingAnalysis?.() ?? null);
     const backingClockPublisher = createBackingClockPublisher(() => readBackingSnapshot(audio));
     ipcMain.on('audio:subscribeBackingSnapshots', (event, token: number) => backingClockPublisher.start(event.sender, token));
     ipcMain.on('audio:unsubscribeBackingSnapshots', (event, token: number) => backingClockPublisher.stop(event.sender, token));
     ipcMain.handle('audio:getBackingDuration', () => audio?.getBackingDuration() ?? 0);
     ipcMain.handle('audio:isBackingPlaying', () => audio?.isBackingPlaying() ?? false);
-    ipcMain.handle('audio:setBackingSpeed', (_event, speed: number) => {
+    ipcMain.handle('audio:setBackingSpeed', async (_event, speed: number) => {
         // Feature-detect the method the same way getSampleRate / scoreChord do —
         // a downlevel native addon that predates setBackingSpeed would throw rather
         // than silently no-op, so we guard the method's existence explicitly and
@@ -1377,8 +1409,7 @@ export function initAudioBridge(): void {
         // a rejected call from a successful one.
         if (!Number.isFinite(speed) || speed <= 0) return false;
         try {
-            audio.setBackingSpeed(speed);
-            return true;
+            return await audio.setBackingSpeed(speed) !== false;
         } catch (e: unknown) {
             console.warn(`[audio] setBackingSpeed failed: ${e instanceof Error ? e.message : String(e)}`);
             return false;

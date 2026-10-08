@@ -23,17 +23,20 @@ int main() {
     slopsmith::BackingPlayer player(state);
     player.prepare(48000, 256);
     player.invalidateOutputTiming();
-    assert(!player.getClockSnapshot().valid); // no fabricated track before load
+    assert(!player.getClockSnapshot().playing && !player.getClockSnapshot().render.valid);
+    player.prepare(48000, 256);
     assert(player.load(fixture.getFile()));
     auto loaded = player.getClockSnapshot();
     assert(loaded.valid && loaded.position == 0 && !loaded.playing && !loaded.ended);
     player.start();
     auto started = player.getClockSnapshot();
-    assert(started.playing && started.generation > loaded.generation);
+    assert(!started.playing && started.generation > loaded.generation); // no presentation before the first callback
+    double callbackTime = juce::Time::getMillisecondCounterHiRes();
     const auto block = [&] {
         const juce::ScopedLock owner(player.getLock());
         assert(player.readyLocked());
-        assert(player.renderBlockLocked(256) == 256);
+        assert(player.renderBlockLocked(256, callbackTime) == 256);
+        callbackTime += 256000.0 / 48000;
         return player.getClockSnapshot();
     };
     auto advancing = block();
@@ -43,9 +46,10 @@ int main() {
     assert(advancing.render.sampleRate == 48000 && advancing.render.outputLatencyFrames == -1);
     assert(advancing.render.stretchInputLatencyFrames == 0 && advancing.render.stretchOutputLatencyFrames == 0);
     assert(advancing.render.sourcePositionAfterRender == advancing.position);
-    assert(advancing.render.startedAtMs <= advancing.sampledAtMs);
+    assert(advancing.render.firstFramePosition == 0);
     state.currentSampleRate.store(44100);
     player.prepare(44100, 256, 512);
+    assert(player.waitForRequest(player.currentRequestId()));
     const auto reconfigured = player.getClockSnapshot();
     assert(reconfigured.valid && reconfigured.generation > advancing.generation);
     assert(reconfigured.position == advancing.position && reconfigured.playing);
@@ -71,6 +75,8 @@ int main() {
     const auto frozenSequence = outputStopped.sequence;
     juce::Thread::sleep(5);
     assert(player.getClockSnapshot().sequence == frozenSequence);
+    player.prepare(44100, 256, 512);
+    assert(player.waitForRequest(player.currentRequestId()));
     player.setPosition(.99); player.start();
     for (int i = 0; i < 200 && player.isPlaying(); ++i) block();
     const auto ended = player.getClockSnapshot();
@@ -78,6 +84,6 @@ int main() {
     assert(ended.position <= player.getDuration());
     assert(!player.load(fixture.getFile().getSiblingFile("missing-clock-fixture.wav")));
     const auto missing = player.getClockSnapshot();
-    assert(missing.valid && missing.position == 0 && !missing.playing && !missing.ended);
+    assert(missing.valid && missing.position == 0 && !missing.playing && !missing.ended && missing.failed);
     std::cout << "real backing transport snapshot: load, play, seek, rate, pause, EOF and failed load passed\n";
 }

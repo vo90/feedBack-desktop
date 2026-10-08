@@ -13,3 +13,5 @@ enable_testing()
 add_subdirectory(../engine_units "${CMAKE_BINARY_DIR}/engine_units")
 target_include_directories(backing_player_clock_test PRIVATE
     "${SIGNALSMITH_STRETCH_DIR}" "${SIGNALSMITH_STRETCH_DIR}/..")
+target_include_directories(backing_session_test PRIVATE
+    "${SIGNALSMITH_STRETCH_DIR}" "${SIGNALSMITH_STRETCH_DIR}/..")

@@ -905,6 +905,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     float* const* outputData, int numOutputChannels,
     int numSamples, const juce::AudioIODeviceCallbackContext&)
 {
+    const double callbackAtMs = juce::Time::getMillisecondCounterHiRes();
     // Flush denormals (FTZ/DAZ) for the ENTIRE realtime callback. The chain is
     // full of IIR state (NAM, cab IRs, VST amps/EQ/comp); after each note that
     // state decays toward zero and lands in the denormal range, where every op
@@ -997,7 +998,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
         const juce::ScopedTryLock sl(backing.getLock());
         if (sl.isLocked() && backing.readyLocked())
         {
-            const int outSamples = backing.renderBlockLocked(numSamples);
+            const int outSamples = backing.renderBlockLocked(numSamples, callbackAtMs);
             const float bVol = backingVolume.load();
             streamBackingFrames = outSamples; streamBackingVol = bVol; streamBackingOn = true;
             const int mixChannels = juce::jmin(numOutputChannels, 2);
@@ -1087,6 +1088,7 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
                                       int numOutputChannels,
                                       int numSamples)
 {
+    const double callbackAtMs = juce::Time::getMillisecondCounterHiRes();
     // Split-mode output clock: this callback renders the backing track (phase
     // vocoder + loudness leveler) and mixes it with the chain output. Those
     // carry IIR/decay state too, so flush denormals here as well — the primary
@@ -1199,7 +1201,7 @@ void AudioEngine::audioOutputCallback(const float* const* /*inputData*/,
         if (sl.isLocked() && backing.readyLocked())
         {
             // Shared with the duplex path so the two callbacks can't drift.
-            const int backingOut = backing.renderBlockLocked(numSamples);
+            const int backingOut = backing.renderBlockLocked(numSamples, callbackAtMs);
             const float bVol = backingVolume.load();
             streamBackingFrames = backingOut; streamBackingVol = bVol; streamBackingOn = true;
             // RMS, computed identically to the duplex path so getBackingLevel()

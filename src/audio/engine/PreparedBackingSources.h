@@ -24,7 +24,7 @@ public:
 
     PreparedBackingSources(std::vector<juce::File> files, double outputSampleRate,
                            double startSeconds = 0,
-                           unsigned capacity = BackingSourceQueue::defaultCapacity);
+                           unsigned capacity = BackingSourceQueue::defaultCapacity, bool fullMixLast = false);
     ~PreparedBackingSources() override; // preparation/retirement worker; may wait on I/O
 
     State state() const noexcept { return state_.load(std::memory_order_acquire); }
@@ -45,6 +45,7 @@ private:
     void run() override;
     const std::vector<juce::File> files_;
     const double sampleRate_, requestedStart_;
+    const bool fullMixLast_;
     BackingSourceQueue queue_;
     std::atomic<State> state_{State::preparing};
     std::atomic<bool> decodedEnd_{false};

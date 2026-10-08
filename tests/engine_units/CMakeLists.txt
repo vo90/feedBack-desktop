@@ -34,6 +34,10 @@ add_executable(backing_sources_test backing_sources_test.cpp)
 target_compile_features(backing_sources_test PRIVATE cxx_std_17)
 target_link_libraries(backing_sources_test PRIVATE Threads::Threads)
 add_test(NAME backing_sources COMMAND backing_sources_test)
+add_executable(audio_observation_test audio_observation_test.cpp)
+target_compile_features(audio_observation_test PRIVATE cxx_std_17)
+target_link_libraries(audio_observation_test PRIVATE Threads::Threads)
+add_test(NAME audio_observation COMMAND audio_observation_test)
 
 # Available in the full addon build; the standalone pure-helper harness has no JUCE.
 if(TARGET juce::juce_audio_formats)
@@ -53,7 +57,9 @@ if(TARGET juce::juce_audio_formats)
     add_test(NAME device_probe COMMAND device_probe_test)
 
     add_executable(backing_player_clock_test backing_player_clock_test.cpp
-        ../../src/audio/engine/BackingPlayer.cpp)
+        ../../src/audio/engine/BackingPlayer.cpp
+        ../../src/audio/engine/BackingSession.cpp
+        ../../src/audio/engine/PreparedBackingSources.cpp)
     target_compile_features(backing_player_clock_test PRIVATE cxx_std_20)
     target_include_directories(backing_player_clock_test PRIVATE
         ../../src/audio/third_party/signalsmith-stretch ../../src/audio/third_party)
@@ -62,4 +68,13 @@ if(TARGET juce::juce_audio_formats)
     target_link_libraries(backing_player_clock_test PRIVATE
         juce::juce_audio_devices juce::juce_audio_formats)
     add_test(NAME backing_player_clock COMMAND backing_player_clock_test)
+    add_executable(backing_session_test backing_session_test.cpp
+        ../../src/audio/engine/BackingPlayer.cpp ../../src/audio/engine/BackingSession.cpp
+        ../../src/audio/engine/PreparedBackingSources.cpp)
+    target_compile_features(backing_session_test PRIVATE cxx_std_20)
+    target_include_directories(backing_session_test PRIVATE
+        ../../src/audio/third_party/signalsmith-stretch ../../src/audio/third_party)
+    target_compile_definitions(backing_session_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(backing_session_test PRIVATE juce::juce_audio_devices juce::juce_audio_formats)
+    add_test(NAME backing_session COMMAND backing_session_test)
 endif()

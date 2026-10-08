@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <optional>
 
 // InputRingReader — the narrow slice of a capture chain that NoteVerifier needs:
 // the post-input lock-free sample ring plus the device sample rate. Factored out
@@ -26,4 +27,5 @@ public:
 
     // The live device sample rate the ring samples were captured at.
     virtual double getCurrentSampleRate() const = 0;
+    virtual std::optional<double> inputReceiptTimeFor(uint64_t) const { return {}; }
 };

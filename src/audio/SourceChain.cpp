@@ -20,6 +20,7 @@ void SourceChain::prepare(double sr, int blockSize)
     // cold-start frame instead of mixing in stale samples from the previous run.
     // The audio thread isn't running yet (device-start hook), so relaxed is fine.
     inputFrameRingWriteIndex.store(0, std::memory_order_relaxed);
+    inputCaptureClock.publish(0, 0);
     for (auto& slot : inputFrameRing)
         slot.store(0.0f, std::memory_order_relaxed);
 
@@ -56,6 +57,7 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
                                juce::AudioBuffer<float>& buffer, int effectiveOutputChannels,
                                int numSamples) noexcept
 {
+    const auto inputReceivedAtMs = juce::Time::getMillisecondCounterHiRes();
     const float inGain = inputGain.load();
     const int selectedCh = selectedInputChannel.load();
 
@@ -195,6 +197,7 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
             inputFrameRing[(w + (uint64_t) i) & (uint64_t) kMask]
                 .store(monoSource[i], std::memory_order_relaxed);
         inputFrameRingWriteIndex.store(w + (uint64_t) numSamples, std::memory_order_release);
+        inputCaptureClock.publish(w + (uint64_t) numSamples, inputReceivedAtMs);
     }
 
     noiseGate.processBlock(buffer);

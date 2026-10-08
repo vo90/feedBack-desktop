@@ -1,125 +1,90 @@
-Unified native backing: foundation milestone
+Unified native backing and independent calibration
 
-Implementation status
----------------------
-This milestone adds the decoder/mixer building block, a tested timing contract,
-and backward-compatible render diagnostics. It does NOT select native multistem
-playback in the game yet. Existing backing playback, calibration, and scoring
-retain their behavior. PreparedBackingSources is built into the addon but is not
-instantiated by its current backing player.
+Implemented behavior
+--------------------
+BackingPlayer uses one BackingSession for a full mix, one stem, or up to 32
+sources (including the optional pristine full mix). Sources are decoded and
+resampled on a worker into bounded aligned queues, mixed before one shared
+Signalsmith stretcher and leveler, then sent through the selected native output.
+At unity stem gains, an available aligned full mix plays alone; changing a stem
+crossfades to the separated mix without replacing the transport. Missing or
+misaligned optional full mixes retry the stems through the same native path.
 
-Native source preparation
--------------------------
-PreparedBackingSources owns one immutable decoder generation: files, output
-sample rate, and start position. It opens files and resamples on its worker.
-All source channels are published together into BackingSourceQueue. The audio
-consumer sees one shared frame frontier, mixes with per-source gain ramps, and
-never invokes a codec, allocates, waits, or takes the worker's resampler locks.
-Starvation returns a cleared block without advancing any source. EOF returns
-the remaining frames, zero-pads the final block, then reports end. Decode failure
-is distinct from successful silence and end-of-file.
+A preparation worker owns creation, priming, cancellation and retirement.
+Load/seek/rate changes use request generations and async N-API completion;
+pause intent survives preparation. The callback retains a nonblocking try-lock,
+never opens/decodes a file, waits for preparation, or destroys a session.
+Fractional frame accounting supports noninteger speeds. Lookahead is prepared
+before playback and the stretch tail drains before EOF. Decoder failure has an
+explicit failed snapshot flag and stop-confirmed browser recovery.
 
-Limits are explicit: 1–32 mono/stereo sources (optional full mix counts as one),
-8–384 kHz, positive duration up to 24 hours. A default 32,768-frame stereo queue
-uses 256 KiB per source; optional capacity is capped at 262,144 frames. This
-prefetch capacity is not output latency: consumption starts at the first queued
-frame. The eventual owner must size capacity for the maximum stretch pull.
-
-Seek/format change prepares another generation. Never reset a live queue.
-Sources are aligned to the output-frame timeline; source seek positions round
-down to a source frame. Mixed-rate seek phase/filter-history precision remains
-an integration concern: opening a new resampler cannot preserve the previous
-filter history. Do not claim bit-identical mixed-rate seek versus uninterrupted
-playback from these tests.
-
-Destruction waits for the decoder to leave its codec; it must occur on the
-preparation/retirement worker, never the audio callback or Electron main/UI
-thread. The future session owner must bound concurrent preparations, cancel
-superseded requests, install prepared sessions at a callback boundary, and retire
-them off the callback. No force-killing a codec thread is permitted.
+Stems attempts native preparation before creating an AudioContext or fetching
+browser PCM. Legacy/unsupported hosts retain browser compatibility. Native
+analysis supplies a bounded read-only mono observation with output gains;
+FFT runs in the renderer. Opening a reactive visualization does not require
+browser playback. Consumers that explicitly require a live browser AudioNode
+graph still use the existing compatibility handoff.
 
 Timing contract
 ---------------
-BackingTiming.h accepts a first-frame song position and a callback-entry anchor
-in one monotonic clock domain. Driver output delay and residual A/V correction
-are separate. Input capture/detector age maps a detection event back to its
-capture time; it does not hold the event or delay the detection thread.
+The legacy raw transport position and getTime remain for seek/loop control.
+A nested version-2 presentation snapshot anchors the first rendered frame at
+output callback entry. JUCE's reported output latency is applied once, without
+adding another buffer period. Unknown driver latency is reported as unknown
+and receives zero automatic correction; downstream TV processing is manual.
 
-song time = first-frame song time
-          + (event time - callback time - output delay + residual A/V) * rate
+presentation = first-frame song position
+             + (event time - callback entry - reported output delay) * rate
+judgment     = presentation + song offset + (AV correction - input age) * rate
 
-All time differences above are wall-clock seconds. For detection, replace event
-time with detection timestamp minus capture/detection age. A negative residual
-shifts the reference earlier. Session and route IDs must match; invalid values
-and unknown (negative) output latency are rejected. This projection applies to
-one continuous playing segment; lifecycle owners must prevent extrapolation
-across pause, seek, rate changes, starvation, or output stop. Song/chart offsets
-are a separate mapping, not folded into physical latency.
+All differences in parentheses are physical seconds. Input processing is never
+held waiting for output. The native verifier refreshes its reference when IPC
+arrives and timestamps the input ring so worker/IPC scheduling delay is not
+mistaken for physical input age. Extra source correction remains independent.
+Default and custom highway renderers, NoteDetect, lyrics and rig timing use the
+presentation contract. Metronome visuals follow presentation; click generation
+keeps its scheduling clock. Native EOF retains its final anchor long enough for
+a negative residual output calibration to finish, then bounds the chart at end.
 
-At rate 1: a note captured at 1500 ms and detected at 1502 ms, with 500 ms
-output delay, maps to the same song moment as a note captured at 1000 ms with
-zero output delay. It can be represented as output delay 0 plus residual -500,
-or known output delay 100 plus residual -400. Using known 100 plus residual
--500 would compensate twice. At other speeds the correction scales by rate.
-This deterministic test verifies the equation, not the current game's complete
-judgment pipeline or any device's physical latency.
+Calibration profiles
+--------------------
+Desktop stores version-2 output/input profiles in slopsmith-audio-calibration.json
+inside the current Electron profile. Keys include backend, actual opened device,
+actual sample rate and buffer size, and input channel for input correction.
+JUCE's portable API exposes exact device names; a future endpoint ID takes
+precedence. Duplicate names produce session-only profiles that require recheck.
+Default resolves to the actual device. Failed Apply attempts restore the prior
+working route and never persist the rejected selection. Browser fallback keeps
+the old global AV value separately. That old value is retained as migration
+evidence and is not copied onto every native output. New native profiles start
+at zero residual with a clear recheck label. Existing input correction migrates
+only to the first input profile, also marked unchecked.
 
-Observational snapshot extension
---------------------------------
-The existing snapshot version/position are unchanged. A new renderTiming object
-has its own version 1 and contains:
-  valid; routeGeneration; startedAgeMs; sourcePositionAfterRender;
-  sampleRate; frames; reportedOutputLatencyFrames;
-  stretchInputLatencyFrames; stretchOutputLatencyFrames;
-  timestampMeaning = backing-render-start.
+Limits and validation
+---------------------
+Sources: 1-32 mono/stereo files, 8-384 kHz, positive duration up to 24 hours.
+Queues default to 32768 frames and are bounded at 262144; prefetch depth is not
+output delay. Speed is bounded at .01-4x. Source gains are finite 0-2.
+Seek/resampler restart can change filter history; no claim of sample-identical
+mixed-rate seeks versus uninterrupted playback is made.
 
-The native snapshot reads these fields coherently with the legacy clock, using
-bounded attempts and lock-free atomic payload fields. Route generation changes
-on output preparation/stop. Load, seek, pause, and start invalidate the prior
-render observation until another block is rendered. -1 driver latency means
-unknown; neither a monitor-ring estimate nor another callback period is added.
+Configure tests/native_backing with existing pinned JUCE_SOURCE_DIR and
+SIGNALSMITH_STRETCH_DIR. Tests cover coherent queues/snapshots, real WAV/OGG
+workers, full-mix/six-source parity, mixed rates, seek, cancellation, optional
+full-mix validation, EOF, errors and concurrent capture/analysis observations.
+BackingSession tests compare one and six sources at .5/.73/1/1.5/2/4x.
+Core/Stems tests exercise exclusive ownership, controls, lazy fallback and no
+browser allocation for native preparation. Timing tests include 2ms input and
+-500ms output correction at different speeds, including the final output tail.
+Profile tests cover restart, actual endpoint/format changes, ambiguity and failed
+Apply rollback. Contract snapshots include the deliberate new API methods.
 
-This timestamp is start of backing rendering, NOT entry to the device callback
-and NOT DAC presentation. Do not directly construct BackingPresentationAnchor
-from it. Stage integration must provide the correctly anchored presentation
-mapping, including preceding callback work and driver semantics.
-
-Both halves of Signalsmith's reported latency are exposed. Its documentation
-also requires input preroll and output draining. The existing player's legacy
-position compensates only output latency; this milestone makes the components
-visible but deliberately does not change current calibration/scoring semantics.
-
-Tests
------
-Configure tests/native_backing with explicit paths to existing pinned JUCE and
-signalsmith-stretch checkouts, using JUCE_SOURCE_DIR and SIGNALSMITH_STRETCH_DIR.
-Build these targets and run their corresponding CTest names:
-  backing_sources_test / backing_sources
-  prepared_backing_sources_test / prepared_backing_sources
-  backing_clock_snapshot_test / backing_clock_snapshot
-  backing_player_clock_test / backing_player_clock
-No audio device is opened. Fixtures are generated in a unique temporary folder.
-
-Coverage: full mix versus six stems, 32-source boundary, WAV and OGG, resampling,
-mixed source rates, unequal lengths, gains, full-mix crossfade, seek, EOF,
-missing source, nonfinite gain rejection, cancellation, wraparound, starvation,
-and 200,000 frames with concurrent producer/consumer. Snapshot tests exercise
-100,000 serialized concurrent publications and lock-free reads. Real legacy
-player tests cover play/seek/rate/pause/end and route invalidation.
-The timing test covers 2 ms capture, 500 ms output, added detector age, positive
-and negative residuals, stale IDs, and rates 0.5/0.75/1/1.5/2/4.
-Node backing-clock-bridge and audio-route-timing tests preserve IPC compatibility.
-
-Still required before enabling the feature
------------------------------------------
-1. Transactional session owner and common native stretch/leveler/transport:
-   fractional frame accumulation, preroll, tail drain, rate changes, device
-   reconfiguration, and stop-confirmed compatibility fallback.
-2. Versioned native IPC/Core ownership and Stems controls, validated local paths,
-   no duplicate browser decode, and native analysis for visualizer consumers.
-3. Output presentation clock integration and timestamped judgment tests across
-   the actual NoteDetect paths. Audit lyrics/metronome/rig tone timing consumers.
-4. Per-output calibration profiles and migration after successful device Apply.
-5. Full addon/Electron build, generated runtime validation, then ASIO and Windows
-   hardware acceptance. Neither a source test nor a buffer counter measures the
-   TV's downstream processing delay.
+Physical acceptance still required
+---------------------------------
+Compare full mix, one stem and six stems on the same actual format/output, then
+repeat on ASIO duplex and ASIO input plus Windows output. Verify input judgments,
+pause/seek/loops/speed, final notes, visuals, faders, restart and profile restore.
+Measure long-run underruns/dropouts separately from transition counters.
+Editor/preview/metronome audio retains its existing renderer capture route;
+this change unifies backing playback, not every sound source in the app.
+No end-to-end device latency or TV-delay reduction is claimed by software tests.

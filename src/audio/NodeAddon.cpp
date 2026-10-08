@@ -52,6 +52,7 @@ using slopsmith::addon::GetBackingDuration;
 using slopsmith::addon::GetBackingLevel;
 using slopsmith::addon::GetBackingPosition;
 using slopsmith::addon::GetBackingSnapshot;
+using slopsmith::addon::GetBackingAnalysis;
 using slopsmith::addon::GetBufferSizes;
 using slopsmith::addon::GetChainGeneration;
 using slopsmith::addon::GetChainState;
@@ -83,6 +84,8 @@ using slopsmith::addon::IsStreamOutputActive;
 using slopsmith::addon::ListInputDevices;
 using slopsmith::addon::ListSources;
 using slopsmith::addon::LoadBackingTrack;
+using slopsmith::addon::LoadBackingSession;
+using slopsmith::addon::SetBackingSourceGains;
 using slopsmith::addon::LoadNoteModel;
 using slopsmith::addon::MoveProcessor;
 using slopsmith::addon::ProbeDeviceOptions;
@@ -450,11 +453,14 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
 
     // Backing track
     exports.Set("loadBackingTrack", Napi::Function::New(env, LoadBackingTrack));
+    exports.Set("loadBackingSession", Napi::Function::New(env, LoadBackingSession));
+    exports.Set("setBackingSourceGains", Napi::Function::New(env, SetBackingSourceGains));
     exports.Set("startBacking", Napi::Function::New(env, StartBacking));
     exports.Set("stopBacking", Napi::Function::New(env, StopBacking));
     exports.Set("seekBacking", Napi::Function::New(env, SeekBacking));
     exports.Set("getBackingPosition", Napi::Function::New(env, GetBackingPosition));
     exports.Set("getBackingSnapshot", Napi::Function::New(env, GetBackingSnapshot));
+    exports.Set("getBackingAnalysis", Napi::Function::New(env, GetBackingAnalysis));
     exports.Set("getBackingDuration", Napi::Function::New(env, GetBackingDuration));
     exports.Set("isBackingPlaying", Napi::Function::New(env, IsBackingPlaying));
     exports.Set("setBackingSpeed", Napi::Function::New(env, SetBackingSpeed));

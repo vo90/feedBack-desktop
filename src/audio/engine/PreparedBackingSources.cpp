@@ -1,4 +1,5 @@
 #include "PreparedBackingSources.h"
+#include "BackingFrameMath.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -32,11 +33,12 @@ struct Source {
 }
 
 PreparedBackingSources::PreparedBackingSources(std::vector<juce::File> files,
-    double outputSampleRate, double startSeconds, unsigned capacity)
+    double outputSampleRate, double startSeconds, unsigned capacity, bool fullMixLast)
     : Thread("BackingDecode"), files_(std::move(files)), sampleRate_(outputSampleRate),
-      requestedStart_(startSeconds), queue_(static_cast<unsigned>(files_.size()), capacity) {
+      requestedStart_(startSeconds), fullMixLast_(fullMixLast), queue_(static_cast<unsigned>(files_.size()), capacity) {
     if (!std::isfinite(sampleRate_) || sampleRate_ < 8000 || sampleRate_ > 384000
-        || !std::isfinite(requestedStart_) || requestedStart_ < 0 || capacity < decodeBlock)
+        || !std::isfinite(requestedStart_) || requestedStart_ < 0 || capacity < decodeBlock
+        || (fullMixLast_ && files_.size() < 2))
         throw std::invalid_argument("Invalid backing decode format or start position");
     if (!startThread()) state_.store(State::failed, std::memory_order_release);
 }
@@ -84,7 +86,12 @@ void PreparedBackingSources::run() {
                 || reader->numChannels == 0 || reader->numChannels > 2) {
                 state_.store(State::failed, std::memory_order_release); return;
             }
-            duration = std::max(duration, reader->lengthInSamples / reader->sampleRate);
+            const double sourceDuration = reader->lengthInSamples / reader->sampleRate;
+            if (fullMixLast_ && sources.size() + 1 == files_.size()) {
+                if (std::abs(sourceDuration - duration) > std::max(.05, 2048.0 / sampleRate_)) {
+                    state_.store(State::failed, std::memory_order_release); return;
+                }
+            } else duration = std::max(duration, sourceDuration);
             Source source;
             source.input = std::make_unique<CheckedReaderSource>(std::move(reader));
             source.resampler = std::make_unique<juce::ResamplingAudioSource>(source.input.get(), false, 2);
@@ -99,13 +106,13 @@ void PreparedBackingSources::run() {
             state_.store(State::failed, std::memory_order_release); return;
         }
         const double start = std::min(requestedStart_, duration);
-        const auto total = static_cast<std::uint64_t>(std::ceil(duration * sampleRate_));
+        const auto total = static_cast<std::uint64_t>(ceilFrameBoundary(duration * sampleRate_));
         const auto startFrame = start >= duration ? total
-            : std::min(total, static_cast<std::uint64_t>(std::floor(start * sampleRate_)));
+            : std::min(total, static_cast<std::uint64_t>(floorFrameBoundary(start * sampleRate_)));
         const double alignedStart = startFrame / sampleRate_;
         for (auto& source : sources) {
             source.input->position = std::min(source.input->reader->lengthInSamples,
-                static_cast<juce::int64>(std::floor(alignedStart * source.input->reader->sampleRate)));
+                static_cast<juce::int64>(floorFrameBoundary(alignedStart * source.input->reader->sampleRate)));
             source.resampler->flushBuffers();
         }
         duration_.store(duration, std::memory_order_relaxed);

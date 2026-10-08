@@ -1,376 +1,188 @@
-// BackingPlayer implementation — moved verbatim from AudioEngine.cpp (TLC
-// plan phase 3 / §2.4); member names lose their backing prefixes, logic is
-// unchanged. See BackingPlayer.h for the boundary rationale.
-
 #include "BackingPlayer.h"
-
 #include <cmath>
-#include <iostream>
 
 namespace slopsmith {
+BackingPlayer::BackingPlayer(EngineState& state) : Thread("BackingPreparation") {
+    outputRate = state.currentSampleRate.load(); outputBlock = state.outputBlockSize.load();
+    // Loading before a device opens may use the default preparation format.
+    if (!std::isfinite(outputRate) || outputRate < 8000 || outputRate > 384000) outputRate = 48000;
+    if (outputBlock <= 0 || outputBlock > 16384) outputBlock = 256;
+    workerStarted = startThread();
+}
+BackingPlayer::~BackingPlayer() { signalThreadShouldExit(); notify(); stopThread(-1); }
 
-void BackingPlayer::publishClockLocked()
-{
+void BackingPlayer::publishClockLocked() {
     clockSnapshot.publish(cachedPosition.load(), juce::Time::getMillisecondCounterHiRes(),
-                          speed.load(), clockGeneration, playing.load(), ended, renderObservation);
+        requestedRate, clockGeneration, playing.load() && !buffering, ended, renderObservation, failed);
 }
 
-bool BackingPlayer::load(const juce::File& file)
-{
-    const juce::ScopedLock sl(lock);
-    stopNoLock();
-    renderObservation.valid = false;
-    ended = false;
-    transport.reset();
-    readerSource.reset();
-
-    const bool exists = file.existsAsFile();
-    std::cerr << "[AudioEngine] loadBackingTrack path="
-              << file.getFullPathName().toStdString()
-              << " exists=" << exists
-              << " size=" << (exists ? (long long) file.getSize() : -1)
-              << std::endl;
-
-    auto* reader = formatManager.createReaderFor(file);
-    if (!reader)
-    {
-        std::cerr << "[AudioEngine] loadBackingTrack: no reader for ext='"
-                  << file.getFileExtension().toStdString()
-                  << "' (registered formats=" << formatManager.getNumKnownFormats()
-                  << ")" << std::endl;
-        // Transport/source already reset above; clear cached state so the renderer
-        // doesn't keep displaying the previous track's position/duration.
-        cachedPosition.store(0.0);
-        cachedDuration.store(0.0);
-        publishClockLocked();
-        return false;
-    }
-
-    const double readerSampleRate = reader->sampleRate;
-    const juce::int64 readerLengthInSamples = reader->lengthInSamples;
-    const double sr = state.currentSampleRate.load(std::memory_order_relaxed);
-    // Backing audio plays through the output device in both modes, so size
-    // against outputBlockSize. In duplex mode outputBlockSize == inputBlockSize;
-    // in split mode the output device's clock drives the backing pull.
-    const int    bs = state.outputBlockSize.load(std::memory_order_relaxed);
-
-    readerSource = std::make_unique<juce::AudioFormatReaderSource>(reader, true);
-    transport = std::make_unique<juce::AudioTransportSource>();
-    // Read-ahead on readThread so the RT audio thread normally never touches
-    // the disk or the format codec. Previously this passed (…, 0, nullptr, …):
-    // with no read-ahead buffer the transport decoded the file synchronously
-    // inside getNextAudioBlock ON the audio callback, so any disk seek /
-    // decode spike (worst for compressed formats) blew the block budget →
-    // underruns heard as glitches or brief mutes while a song plays.
-    // 32768 source frames ≈ 0.68 s @ 48k of look-ahead absorbs those spikes.
-    //
-    // Known residual (accepted): juce::BufferingAudioSource is not fully
-    // RT-safe — readBufferSection() holds callbackLock across the decode of one
-    // refill chunk, and the callback's getNextAudioBlock() takes the same lock,
-    // so the RT thread can still block behind an in-flight chunk decode. The
-    // window is bounded (JUCE caps chunks at 2048 source frames) and only hit
-    // when a refill is mid-decode, vs. the old guaranteed full decode on every
-    // block; a truly lock-free ring would mean replacing the JUCE transport
-    // stack and isn't worth it here.
-    // The 4th arg makes AudioTransportSource SRC the file to device rate.
-    // Stretch always sees device-rate audio so that its presetDefault parameters match.
-    constexpr int kReadAheadSamples = 32768;
-    transport->setSource(readerSource.get(), kReadAheadSamples,
-                         &readThread, readerSampleRate);
-
-    // Loading a backing track before the audio device has started leaves
-    // sr/bs at zero. presetDefault(2, 0.0f) would seed the stretcher with
-    // undefined internal timing, and prepareToPlay(0, 0) is similarly
-    // ill-defined. Defer the stretcher + buffer setup; the relevant
-    // audio*AboutToStart() re-runs the same block (via prepare()) once a real
-    // sample rate / block size are known.
-    if (sr > 0.0 && bs > 0)
-    {
-        // prepareToPlay's first arg is an upper bound on subsequent
-        // getNextAudioBlock requests, per the juce::AudioSource contract.
-        // The RT callback can pull ceil(bs * kMaxSpeed) frames in a single
-        // block when the speed is above 1×, so prepare for that worst case —
-        // preparing with just `bs` would risk JUCE internal buffer
-        // overruns/asserts on the first faster-than-1× block.
-        const int maxInputFrames = (int) std::ceil(bs * kMaxSpeed) + 64;
-        transport->prepareToPlay(maxInputFrames, sr);
-
-        stretch.presetDefault(2, (float) sr);
-        stretch.reset();
-        stretchLatencySamples.store(stretch.outputLatency(), std::memory_order_relaxed);
-
-        inputBuffer.setSize(2, maxInputFrames, false, false, true);
-        outputBuffer.setSize(2, bs, false, false, true);
-    }
-
-    cachedDuration.store(transport->getLengthInSeconds());
-    cachedPosition.store(0.0);
-    heardPositionSec.store(0.0, std::memory_order_relaxed);
-    ended = false;
+std::uint64_t BackingPlayer::scheduleLocked(double position, bool isNewSong) {
+    requestedPosition = position; newSong = isNewSong;
+    playing.store(false); ended = false; succeeded = false; failed = false; buffering = false; drainUntilMs = 0;
+    cachedPosition.store(position); renderObservation.valid = false;
     ++clockGeneration;
-    publishClockLocked();
+    const auto id = requested.fetch_add(1) + 1;
+    publishClockLocked(); notify();
+    return id;
+}
 
-    // Reset the loudness leveler for the new song: clearing the cached sample
-    // rate forces renderBlockLocked() to re-prepare() it on the next block,
-    // dropping the previous track's AGC gain + limiter state. Otherwise the
-    // ~300 ms gain follower would carry over and briefly mis-level the start
-    // of a much louder/quieter next song. Safe here — load holds the lock,
-    // the same lock the render path runs under.
-    levelerSr = 0.0;
-    std::cerr << "[AudioEngine] loadBackingTrack OK sr=" << readerSampleRate
-              << " len=" << readerLengthInSamples
-              << std::endl;
+std::uint64_t BackingPlayer::beginLoad(const std::vector<juce::File>& paths, const std::vector<float>& values, bool fullLast) {
+    if (paths.empty() || paths.size() > BackingSourceQueue::maxSources || paths.size() != values.size()) return 0;
+    for (auto value : values) if (!std::isfinite(value) || value < 0 || value > 2) return 0;
+    const juce::ScopedLock owner(lock);
+    files = paths; gains.fill(0); std::copy(values.begin(), values.end(), gains.begin());
+    fullMixLast = fullLast;
+    wantsPlay = false; requestedRate = 1; cachedDuration.store(0); ++songSerial;
+    return scheduleLocked(0, true);
+}
+
+std::uint64_t BackingPlayer::beginSeek(double seconds) {
+    if (!std::isfinite(seconds)) return 0;
+    const juce::ScopedLock owner(lock);
+    if (files.empty()) return 0;
+    return scheduleLocked(std::clamp(seconds, 0.0, cachedDuration.load()), false);
+}
+
+std::uint64_t BackingPlayer::beginRate(double rate) {
+    if (!std::isfinite(rate) || rate <= 0) return 0;
+    const juce::ScopedLock owner(lock);
+    rate = std::clamp(rate, .01, kMaxSpeed);
+    if (std::abs(rate - 1) < kSpeedBypassEpsilon) rate = 1;
+    if (rate == requestedRate) return requested.load();
+    requestedRate = rate;
+    if (files.empty()) return 0;
+    return scheduleLocked(cachedPosition.load(), false);
+}
+
+bool BackingPlayer::waitForRequest(std::uint64_t id) {
+    if (!id || !workerStarted) return false;
+    while (!threadShouldExit() && requested.load() == id && completed.load() < id) juce::Thread::sleep(1);
+    const juce::ScopedLock owner(lock);
+    return requested.load() == id && completed.load() == id && succeeded;
+}
+
+bool BackingPlayer::setSourceGains(const std::vector<float>& values) {
+    for (float value : values) if (!std::isfinite(value) || value < 0 || value > 2) return false;
+    const juce::ScopedLock owner(lock);
+    if (values.size() != files.size()) return false;
+    std::copy(values.begin(), values.end(), gains.begin());
     return true;
 }
 
-void BackingPlayer::setPosition(double seconds)
-{
-    const juce::ScopedLock sl(lock);
-    if (transport)
-    {
-        transport->setPosition(seconds);
-        renderObservation.valid = false;
-        stretch.reset();
-        // Read back the actual position; the transport may clamp (e.g. negative or past EOF).
-        const double pos = transport->getCurrentPosition();
-        cachedPosition.store(pos);
-        heardPositionSec.store(pos, std::memory_order_relaxed);
-        ended = false;
-        ++clockGeneration;
-        publishClockLocked();
-    }
+void BackingPlayer::start() {
+    const juce::ScopedLock owner(lock);
+    wantsPlay = !files.empty(); ended = false; buffering = true;
+    playing.store(wantsPlay && outputReady && active && committed == requested.load());
+    ++clockGeneration; renderObservation.valid = false; publishClockLocked();
+}
+void BackingPlayer::stop() {
+    const juce::ScopedLock owner(lock);
+    if (files.empty()) return;
+    wantsPlay = false; playing.store(false);
+    ++clockGeneration; renderObservation.valid = false; publishClockLocked();
 }
 
-void BackingPlayer::start()
-{
-    const juce::ScopedLock sl(lock);
-    if (transport)
-    {
-        transport->start();
-        renderObservation.valid = false;
-        playing.store(true);
-        ended = false;
-        heardPositionSec.store(transport->getCurrentPosition(),
-                               std::memory_order_relaxed);
-        ++clockGeneration;
-        publishClockLocked();
+void BackingPlayer::prepare(double sr, int bs, int latency) {
+    const juce::ScopedLock owner(lock);
+    outputReady = std::isfinite(sr) && sr >= 8000 && sr <= 384000 && bs > 0 && bs <= 16384;
+    renderObservation.valid = false; ++renderObservation.routeGeneration;
+    renderObservation.sampleRate = outputReady ? sr : 0;
+    renderObservation.outputLatencyFrames = outputReady && latency >= 0 ? latency : -1;
+    if (outputReady) { outputRate = sr; outputBlock = bs; }
+    if (!files.empty()) {
+        if (outputReady) scheduleLocked(cachedPosition.load(), false);
+        else { playing.store(false); publishClockLocked(); }
     }
+    else publishClockLocked();
 }
-
-void BackingPlayer::stopNoLock()
-{
-    if (transport)
-    {
-        transport->stop();
-        renderObservation.valid = false;
-        stretch.reset();
-        playing.store(false);
-        ++clockGeneration;
-        publishClockLocked();
-    }
-}
-
-void BackingPlayer::stop()
-{
-    const juce::ScopedLock sl(lock);
-    stopNoLock();
-}
-
-void BackingPlayer::setSpeed(double newSpeed)
-{
-    if (!std::isfinite(newSpeed) || newSpeed <= 0.0)
-    {
-        return;
-    }
-
-    const double clamped = juce::jlimit(0.01, kMaxSpeed, newSpeed);
-    // Dead-zone against the last *requested* rate to coalesce rapid slider
-    // ticks — but never skip a change that crosses the 1× bypass boundary, or a
-    // request just shy of 1× (e.g. 0.9995 -> 1.0, diff < 0.001) would leave the
-    // stretcher path engaged when the caller actually asked for transparent
-    // full speed.
-    const double prev = pendingSpeed.load(std::memory_order_relaxed);
-    const bool prevBypass = std::abs(prev    - 1.0) < kSpeedBypassEpsilon;
-    const bool newBypass  = std::abs(clamped - 1.0) < kSpeedBypassEpsilon;
-    if (std::abs(clamped - prev) < 0.001 && prevBypass == newBypass)
-    {
-        return;
-    }
-
-    // Lock-free hand-off to the audio thread. Publish the requested rate, then
-    // raise the pending flag with release so the RT thread is guaranteed to see
-    // the new rate once it observes the flag. renderBlockLocked() adopts the
-    // rate and resets the stretcher together, on the audio thread, so:
-    //   * a control-thread caller (e.g. a speed slider at 30-60 Hz) never takes
-    //     the lock and so never starves the RT tryLock into dropping a block;
-    //   * the new rate is never processed with stale stretch state — the reset
-    //     and the rate adoption happen in the same RT block (see PR #237).
-    // Multiple updates before the RT consumes them coalesce (latest wins), which
-    // naturally throttles stretcher resets during a drag.
-    pendingSpeed.store(clamped, std::memory_order_relaxed);
-    speedChangePending.store(true, std::memory_order_release);
-}
-
-void BackingPlayer::prepare(double sr, int bs, int reportedOutputLatencyFrames)
-{
-    const juce::ScopedLock sl(lock);
-    renderObservation.valid = false;
+void BackingPlayer::invalidateOutputTiming() {
+    const juce::ScopedLock owner(lock);
+    outputReady = false; playing.store(false);
+    renderObservation.valid = false; renderObservation.outputLatencyFrames = -1;
     ++renderObservation.routeGeneration;
-    renderObservation.sampleRate = sr > 0 && std::isfinite(sr) ? sr : 0;
-    renderObservation.outputLatencyFrames = reportedOutputLatencyFrames >= 0 ? reportedOutputLatencyFrames : -1;
-    if (transport && sr > 0.0 && bs > 0)
-    {
-        // See load() for why prepareToPlay uses maxInputFrames rather than bs:
-        // the RT callback can pull ceil(bs * kMaxSpeed) frames in a single
-        // block at faster-than-1× speeds.
-        const int maxInputFrames = (int) std::ceil(bs * kMaxSpeed) + 64;
-        transport->prepareToPlay(maxInputFrames, sr);
-        stretch.presetDefault(2, (float) sr);
-        stretch.reset();
-        stretchLatencySamples.store(stretch.outputLatency(), std::memory_order_relaxed);
-        inputBuffer.setSize(2, maxInputFrames, false, false, true);
-        outputBuffer.setSize(2, bs, false, false, true);
-        ++clockGeneration;
-        publishClockLocked();
-    }
-}
-
-void BackingPlayer::invalidateOutputTiming()
-{
-    const juce::ScopedLock sl(lock);
-    renderObservation.valid = false;
-    renderObservation.outputLatencyFrames = -1;
-    ++renderObservation.routeGeneration;
-    if (transport) publishClockLocked();
-}
-
-int BackingPlayer::renderBlockLocked(int numSamples)
-{
-    // Start of BACKING rendering, not callback entry or physical presentation.
-    const double renderStartedAt = juce::Time::getMillisecondCounterHiRes();
-    // Adopt any speed change requested since the last block (set lock-free by
-    // setSpeed). Common (no-change) path is a plain acquire load — no locked
-    // RMW, so the flag's cache line stays shared and isn't bounced to this
-    // core every callback. Only the rare block that actually consumes a change
-    // does the exchange (clearing the flag atomically so a concurrent setSpeed
-    // can't lose an update). The acquire pairs with the release-store in
-    // setSpeed so the new rate is visible here. Reset the stretcher and
-    // re-anchor the heard position in the SAME block we adopt the rate, so a
-    // block is never processed at the new rate with stale stretch state.
-    // reset() only clears state (no allocation), so it's audio-thread safe.
-    if (speedChangePending.load(std::memory_order_acquire))
-    {
-        speedChangePending.exchange(false, std::memory_order_acquire);
-        speed.store(juce::jlimit(0.01, kMaxSpeed,
-                                 pendingSpeed.load(std::memory_order_relaxed)),
-                    std::memory_order_relaxed);
-        stretch.reset();
-        heardPositionSec.store(transport->getCurrentPosition(),
-                               std::memory_order_relaxed);
-        ++clockGeneration;
-    }
-
-    const double rate = juce::jlimit(0.01, kMaxSpeed, speed.load(std::memory_order_relaxed));
-
-    // Defensive clamp: the buffers are sized by prepare() from the device's
-    // nominal block size, but a callback can deliver a larger numSamples on a
-    // device-reconfig race. Drop the excess frames silently rather than
-    // reading/writing past the allocated span; the next callback after
-    // reconfig arrives at the new nominal size.
-    const int outCap = outputBuffer.getNumSamples();
-    const int inCap  = inputBuffer.getNumSamples();
-    const int outSamples = juce::jmin(numSamples, outCap);
-    const double sr = state.currentSampleRate.load(std::memory_order_relaxed);
-    const bool bypassStretch = std::abs(rate - 1.0) < kSpeedBypassEpsilon;
-
-    int sourceFramesPulled = 0;
-
-    if (bypassStretch)
-    {
-        // 1× — direct transport read, no phase-vocoder path. (The transport
-        // still sample-rate-converts the file to the device rate, so this is
-        // "no time-stretch", not necessarily bit-perfect.)
-        outputBuffer.clear(0, outSamples);
-        juce::AudioSourceChannelInfo info(&outputBuffer, 0, outSamples);
-        transport->getNextAudioBlock(info);
-        sourceFramesPulled = outSamples;
-    }
-    else
-    {
-        // Slow/fast path — pull only the source frames needed for this output
-        // block (output * rate), then stretch in-process to fill outSamples.
-        const int inputFrames = juce::jmin((int) std::ceil(outSamples * rate), inCap);
-
-        inputBuffer.clear(0, inputFrames);
-        juce::AudioSourceChannelInfo info(&inputBuffer, 0, inputFrames);
-        transport->getNextAudioBlock(info);
-        sourceFramesPulled = inputFrames;
-
-        outputBuffer.clear(0, outSamples);
-
-        const float* const* inPtrs  = inputBuffer.getArrayOfReadPointers();
-        float* const* outPtrs = outputBuffer.getArrayOfWritePointers();
-        stretch.process(inPtrs, inputFrames, outPtrs, outSamples);
-    }
-
-    const double transportPos = transport->getCurrentPosition();
-    if (sr > 0.0 && sourceFramesPulled > 0)
-    {
-        // Accumulate the heard (source) position, but clamp to the transport's
-        // actual position. sourceFramesPulled is the requested block size; a
-        // short read (e.g. at EOF, where the transport returns fewer real frames
-        // and zero-pads) would otherwise advance the playhead past the true
-        // source point and report progress beyond the track duration before
-        // `playing` flips false. getCurrentPosition() stays clamped to the
-        // real source position.
-        double heard = heardPositionSec.load(std::memory_order_relaxed)
-                       + static_cast<double>(sourceFramesPulled) / sr;
-        heard = juce::jmin(heard, transportPos);
-        heardPositionSec.store(heard, std::memory_order_relaxed);
-
-        // Bypass reads straight from the transport — no phase-vocoder output
-        // latency to compensate for. Only the stretch path adds latency.
-        const double latencyInputSec = bypassStretch
-            ? 0.0
-            : (stretchLatencySamples.load(std::memory_order_relaxed) * rate) / sr;
-        cachedPosition.store(juce::jmax(0.0, heard - latencyInputSec));
-    }
-    else
-    {
-        // currentSampleRate is transiently 0 during device teardown/reconfig.
-        // We can't accumulate (no Hz to divide by), so anchor both the heard
-        // accumulator and the published playhead to the real transport position
-        // rather than leaving a stale value visible to the UI.
-        heardPositionSec.store(transportPos, std::memory_order_relaxed);
-        cachedPosition.store(juce::jmax(0.0, transportPos));
-    }
-
-    // Sync the flag if transport stopped at EOF.
-    if (!transport->isPlaying()) {
-        playing.store(false);
-        ended = true;
-    }
-    renderObservation.valid = outSamples > 0 && sr > 0;
-    renderObservation.startedAtMs = renderStartedAt;
-    renderObservation.sourcePositionAfterRender = heardPositionSec.load(std::memory_order_relaxed);
-    renderObservation.sampleRate = sr;
-    renderObservation.frames = outSamples;
-    renderObservation.stretchInputLatencyFrames = bypassStretch ? 0 : stretch.inputLatency();
-    renderObservation.stretchOutputLatencyFrames = bypassStretch ? 0 : stretch.outputLatency();
     publishClockLocked();
-
-    // Normalize the backing track to a consistent target loudness (-12 LUFS)
-    // BEFORE the mixer's backing-volume fader is applied (later in the RT
-    // callback), so every song sits at the same level while the fader still
-    // attenuates it. Standard BS.1770 K-weighting (full-mix music) + a brickwall
-    // limiter to keep boosted peaks safe. RT-safe (no allocation).
-    if (outSamples > 0 && sr > 0.0)
-    {
-        if (sr != levelerSr) { leveler.prepare(sr); levelerSr = sr; }
-        leveler.process(outputBuffer, outSamples, -12.0f);
-    }
-
-    return outSamples;
 }
 
-} // namespace slopsmith
+void BackingPlayer::run() {
+    std::uint64_t seen = 0;
+    while (!threadShouldExit()) {
+        std::vector<juce::File> paths;
+        Gains values;
+        double position, rate, sr;
+        int block;
+        bool resetLeveler, fullLast = false;
+        std::uint64_t song = 0;
+        {
+            const juce::ScopedLock owner(lock);
+            if (requested.load() != seen) {
+                seen = requested.load(); paths = files; values = gains;
+                position = requestedPosition; rate = requestedRate; sr = outputRate;
+                block = outputBlock; song = songSerial;
+                resetLeveler = newSong || committedSong != song;
+                fullLast = fullMixLast;
+            }
+        }
+        if (paths.empty()) { wait(5); continue; }
+        std::unique_ptr<BackingSession> next;
+        bool ok = false;
+        try {
+            next = std::make_unique<BackingSession>(paths, sr, block, position, rate, values, fullLast);
+            const auto deadline = juce::Time::getMillisecondCounterHiRes() + 10000;
+            while (!threadShouldExit() && requested.load() == seen) {
+                const auto status = next->prime();
+                if (status == BackingSession::Result::audio) { ok = true; break; }
+                if (status == BackingSession::Result::failed || juce::Time::getMillisecondCounterHiRes() >= deadline) break;
+                wait(1);
+            }
+        } catch (...) { ok = false; }
+        std::unique_ptr<BackingSession> retired;
+        {
+            const juce::ScopedLock owner(lock);
+            if (!threadShouldExit() && requested.load() == seen) {
+                if (ok && active && !resetLeveler && active->sampleRate() == sr) next->retainLeveler(*active);
+                retired = std::move(active);
+                if (ok) {
+                    active = std::move(next); committed = seen; committedSong = song;
+                    cachedDuration.store(active->duration()); cachedPosition.store(active->position());
+                } else { cachedDuration.store(0); cachedPosition.store(0); }
+                succeeded = ok; failed = !ok; playing.store(ok && wantsPlay && outputReady);
+                renderObservation.valid = false; publishClockLocked(); completed.store(seen);
+            }
+        }
+        // Both superseded and retired sessions are destroyed on THIS worker.
+    }
+    std::unique_ptr<BackingSession> retired;
+    { const juce::ScopedLock owner(lock); retired = std::move(active); }
+}
+
+int BackingPlayer::renderBlockLocked(int samples, double callbackAtMs) {
+    const auto started = callbackAtMs > 0 ? callbackAtMs : juce::Time::getMillisecondCounterHiRes();
+    const int frames = std::clamp(samples, 0, active->blockSize());
+    const double before = active->position();
+    const auto status = active->render(frames, gains);
+    analysis.append(active->buffer().getReadPointer(0), active->buffer().getReadPointer(1), static_cast<unsigned>(frames));
+    buffering = status == BackingSession::Result::waiting;
+    if (status == BackingSession::Result::audio) {
+        cachedPosition.store(active->position());
+        renderObservation.valid = true;
+        renderObservation.startedAtMs = started;
+        renderObservation.firstFramePosition = before;
+        renderObservation.sourcePositionAfterRender = active->sourcePosition();
+        renderObservation.sampleRate = active->sampleRate(); renderObservation.frames = frames;
+        renderObservation.stretchInputLatencyFrames = active->inputLatency();
+        renderObservation.stretchOutputLatencyFrames = active->outputLatency();
+        if (active->position() >= active->duration())
+            drainUntilMs = started + std::max(0, renderObservation.outputLatencyFrames) * 1000.0 / active->sampleRate()
+                + (active->duration() - before) * 1000.0 / requestedRate;
+    } else if (status == BackingSession::Result::ended && started < drainUntilMs) {
+        // Keep the last output anchor until its final frame reaches the device.
+        // The decoder/stretcher is finished; the hardware queue is not yet.
+    } else if (status == BackingSession::Result::ended || status == BackingSession::Result::failed) {
+        playing.store(false); wantsPlay = false; ended = status == BackingSession::Result::ended;
+        failed = status == BackingSession::Result::failed;
+        if (failed) renderObservation.valid = false;
+    } // Waiting retains the last rendered anchor while queued output drains.
+    publishClockLocked();
+    return frames;
+}
+}

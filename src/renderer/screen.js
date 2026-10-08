@@ -1672,7 +1672,28 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 outputDeviceSelect, sampleRateSelect, bufferSizeSelect, inputChannelSelect,
                 toggleBtn, applyDeviceBtn].filter(Boolean);
             controls.forEach(control => { control.disabled = true; });
+            const wasRunning = audioRunning;
+            let previousDevice = null, configured = false;
+            async function restorePreviousDevice() {
+                if (!wasRunning || !previousDevice?.input || !previousDevice?.output) return '';
+                try {
+                    const restored = await api.setDevice({
+                        inputType: previousDevice.inputType || previousDevice.type,
+                        inputDevice: previousDevice.input,
+                        outputType: previousDevice.outputType || previousDevice.type,
+                        outputDevice: previousDevice.output,
+                        sampleRate: previousDevice.sampleRate,
+                        bufferSize: previousDevice.inputBlockSize || previousDevice.blockSize,
+                    });
+                    if (!(typeof restored === 'boolean' ? restored : restored?.ok)) return ' Previous device could not be restored.';
+                    await api.startAudio();
+                    audioRunning = await api.isAudioRunning();
+                    toggleBtn.textContent = audioRunning ? 'Stop' : 'Start';
+                    return audioRunning ? ' Previous audio setup restored.' : ' Previous device could not restart.';
+                } catch (_) { return ' Previous device could not be restored.'; }
+            }
             try {
+                previousDevice = await api.getCurrentDevice();
                 statusText.textContent = 'Configuring device...';
                 if (audioRunning) {
                     await api.stopAudio();
@@ -1697,6 +1718,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 const ok = typeof result === 'boolean' ? result : !!result?.ok;
                 const errMsg = (typeof result === 'object' && result?.error) ? String(result.error) : '';
                 if (ok) {
+                    configured = true;
                     const inputChannel = parseInt(inputChannelSelect.value);
                     if (Number.isFinite(inputChannel)) await api.setInputChannel(inputChannel);
                     await api.setMonitorMute(monitorMuteCheckbox.checked);
@@ -1717,13 +1739,16 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     statusText.textContent = errMsg
                         ? `Failed to configure device: ${errMsg}`
                         : 'Failed to configure device';
+                    statusText.textContent += await restorePreviousDevice();
                     statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
                 }
             } catch (error) {
                 statusText.textContent = `Failed to configure device: ${error?.message || error}`;
+                if (!configured) statusText.textContent += await restorePreviousDevice();
                 statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
             } finally {
                 applyingDeviceSettings = false;
+                window.dispatchEvent(new CustomEvent('feedback:audio-route-changed'));
                 controls.forEach(control => { control.disabled = false; });
                 applyDeviceBtn.disabled = !deviceOptionsCompatible;
             }
@@ -3148,7 +3173,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (!toneSwitcher || !autoSwitchEnabled) return;
             const hw = window.highway || window._slopsmithHighway;
             if (!hw || !hw.getTime) return;
-            const t = hw.getTime();
+            const t = hw.getPresentationTime ? hw.getPresentationTime() : hw.getTime();
             const changes = hw.getToneChanges ? hw.getToneChanges() : [];
             const base = hw.getToneBase ? hw.getToneBase() : '';
 
@@ -3243,7 +3268,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             return;
         }
 
-        const currentTime = hw.getTime ? hw.getTime() : 0;
+        const currentTime = hw.getPresentationTime ? hw.getPresentationTime() : (hw.getTime ? hw.getTime() : 0);
         const activeNow = getActiveToneAtTime(currentTime, toneChanges, toneBase);
 
         if (!forceBypass) {
@@ -3595,7 +3620,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
             let tNum = 0, changes = [], base = '';
             try {
-                tNum = (hw && typeof hw.getTime === 'function') ? hw.getTime() : 0;
+                tNum = hw?.getPresentationTime ? hw.getPresentationTime() : ((hw && typeof hw.getTime === 'function') ? hw.getTime() : 0);
                 changes = (hw && hw.getToneChanges) ? hw.getToneChanges() : [];
                 base = (hw && hw.getToneBase) ? hw.getToneBase() : '';
             } catch (e) {
@@ -3681,7 +3706,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 const switcher = window._toneSwitcher;
                 if (!switcher?.taSwitcher) return;
                 const hw = window.highway || window._slopsmithHighway;
-                const tNum = hw?.getTime ? hw.getTime() : 0;
+                const tNum = hw?.getPresentationTime ? hw.getPresentationTime() : (hw?.getTime ? hw.getTime() : 0);
                 const changes = hw?.getToneChanges ? hw.getToneChanges() : [];
                 const base = hw?.getToneBase ? hw.getToneBase() : '';
                 const timelineTone = getActiveToneAtTime(tNum, changes, base);
@@ -4475,7 +4500,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 return;
             }
 
-            const t = hw.getTime();
+            const t = hw.getPresentationTime ? hw.getPresentationTime() : hw.getTime();
             const changes = hw.getToneChanges ? hw.getToneChanges() : [];
             const base = hw.getToneBase ? hw.getToneBase() : '';
             if (changes.length === 0) return;

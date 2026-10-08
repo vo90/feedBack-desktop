@@ -186,7 +186,8 @@ void NoteVerifier::run()
     // The playhead for this whole pass — interpolated from the last push so
     // every note here is judged against the same chart position.
     double playbackRate = 1;
-    const double playhead = currentPlayhead(&playbackRate);
+    double playhead = currentPlayhead(&playbackRate);
+    const auto observedAtMs = juce::Time::getMillisecondCounterHiRes();
 
     double sr = engine.getCurrentSampleRate();
     if (! std::isfinite(sr) || sr <= 0.0) sr = 48000.0;
@@ -199,6 +200,8 @@ void NoteVerifier::run()
     {
         std::vector<float> fresh;
         const uint64_t w = engine.getInputSince(readCursor, fresh);
+        if (const auto receivedAt = engine.inputReceiptTimeFor(w))
+            playhead -= std::max(0.0, observedAtMs - *receivedAt) * playbackRate / 1000.0;
         readCursor = w;
         if (! fresh.empty())
         {
