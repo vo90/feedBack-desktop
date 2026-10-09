@@ -722,8 +722,42 @@ std::vector<AudioEngine::SourceInfo> AudioEngine::listSources() const
 
 // ── Audio Callback ────────────────────────────────────────────────────────────
 
+AudioEngine::InputChannelSnapshot AudioEngine::getInputChannelSnapshot()
+{
+    std::lock_guard<std::mutex> lock(inputDiscoveryMutex);
+    InputChannelSnapshot result;
+    result.generation = inputDiscoveryGeneration;
+    result.running = inputDiscoveryRunning;
+    result.selected = getInputChannel();
+    result.deviceName = inputDiscoveryDeviceName;
+    result.deviceType = inputDiscoveryDeviceType;
+    result.names = inputDiscoveryNames;
+    if (result.running) inputChannelMeters.arm();
+    result.sequence = inputChannelMeters.getSequence();
+    result.levels = inputChannelMeters.read();
+    return result;
+}
+
+bool AudioEngine::selectInputChannel(int channel, uint64_t generation, int previous)
+{
+    std::lock_guard<std::mutex> lock(inputDiscoveryMutex);
+    if (!inputDiscoveryRunning || inputDiscoveryNames.isEmpty() || generation != inputDiscoveryGeneration
+        || previous != getInputChannel() || channel < -1 || channel >= inputDiscoveryNames.size()) return false;
+    setInputChannel(channel);
+    return true;
+}
+
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
+    {
+        std::lock_guard<std::mutex> lock(inputDiscoveryMutex);
+        inputDiscoveryNames = device->getInputChannelNames();
+        inputDiscoveryDeviceName = device->getName();
+        inputDiscoveryDeviceType = device->getTypeName();
+        inputChannelMeters.prepare(inputDiscoveryNames.size(), device->getCurrentSampleRate());
+        inputDiscoveryGeneration = nextInputDiscoveryGeneration.fetch_add(1) + 1;
+        inputDiscoveryRunning = true;
+    }
     // Fires on the input manager — duplex serves output here too; split has
     // audioOutputAboutToStart on the second manager.
     //
@@ -791,6 +825,11 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 
 void AudioEngine::audioDeviceStopped()
 {
+    {
+        std::lock_guard<std::mutex> lock(inputDiscoveryMutex);
+        inputDiscoveryRunning = false;
+        inputDiscoveryGeneration = nextInputDiscoveryGeneration.fetch_add(1) + 1;
+    }
     if (duplexMode.load(std::memory_order_relaxed)) backing.invalidateOutputTiming();
     // JUCE calls audioDeviceStopped() only AFTER the PRIMARY input device has
     // stopped invoking its IO callback (stop() blocks for the callback thread to
@@ -912,6 +951,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(
     // is 10-100× slower — producing sporadic CPU spikes → buffer underruns heard
     // as random "scratches" + frame stutter. Scoped so it only affects this path.
     const juce::ScopedNoDenormals noDenormals;
+
+    inputChannelMeters.process(inputData, numInputChannels, numSamples);
 
     // Publish that the callback body is executing so removeSource() and deferred-
     // release reclamation know when no source is being processed (the body is

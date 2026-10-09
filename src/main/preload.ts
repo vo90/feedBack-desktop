@@ -272,6 +272,9 @@ const feedBackDesktopApi = {
             ? ipcRenderer.invoke('audio:probeDeviceOptions', inputTypeOrType, inputName, outputTypeOrOutputName)
             : ipcRenderer.invoke('audio:probeDeviceOptions', inputTypeOrType, inputName, outputTypeOrOutputName, outputName),
         getCurrentDevice: () => ipcRenderer.invoke('audio:getCurrentDevice'),
+        getInputChannelSnapshot: () => ipcRenderer.invoke('audio:getInputChannelSnapshot'),
+        confirmInputChannel: (channel: number, generation: number, previous: number) =>
+            ipcRenderer.invoke('audio:confirmInputChannel', channel, generation, previous),
         // True when the app runs with --debug / --verbose / SLOPSMITH_DEBUG.
         // The static bundle gates its verbose [asio-diag] routing lines on
         // this so normal runs don't spam the console.

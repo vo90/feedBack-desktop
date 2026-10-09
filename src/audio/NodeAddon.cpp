@@ -57,6 +57,8 @@ using slopsmith::addon::GetBufferSizes;
 using slopsmith::addon::GetChainGeneration;
 using slopsmith::addon::GetChainState;
 using slopsmith::addon::GetCurrentDevice;
+using slopsmith::addon::GetInputChannelSnapshot;
+using slopsmith::addon::SelectInputChannel;
 using slopsmith::addon::GetDeviceMetrics;
 using slopsmith::addon::GetDeviceTypes;
 using slopsmith::addon::GetLevels;
@@ -338,6 +340,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
     exports.Set("getBufferSizes", Napi::Function::New(env, GetBufferSizes));
     exports.Set("probeDeviceOptions", Napi::Function::New(env, ProbeDeviceOptions));
     exports.Set("getCurrentDevice", Napi::Function::New(env, GetCurrentDevice));
+    exports.Set("getInputChannelSnapshot", Napi::Function::New(env, GetInputChannelSnapshot));
+    exports.Set("selectInputChannel", Napi::Function::New(env, SelectInputChannel));
     exports.Set("setDeviceType", Napi::Function::New(env, SetDeviceType));
     exports.Set("setInputDeviceType", Napi::Function::New(env, SetDeviceType));
     exports.Set("setOutputDeviceType", Napi::Function::New(env, SetOutputDeviceType));

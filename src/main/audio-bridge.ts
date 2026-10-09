@@ -14,6 +14,7 @@ import { createRendererAudioPortBridge } from './renderer-audio-port';
 import { readAudioRouteTiming } from './audio-route-timing';
 import { resolveVerifierTiming } from './verifier-timing';
 import { createCalibrationStore } from './audio-calibration';
+import { confirmInputChannel } from './input-channel-selection';
 import { createGuidedCalibration, calibrationWave } from './guided-calibration';
 
 type AudioModule = Record<string, (...args: any[]) => any>;
@@ -222,7 +223,8 @@ function writeAudioSettings(settings: unknown): boolean {
     try {
         const settingsPath = getAudioSettingsPath();
         fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-        fs.writeFileSync(settingsPath, JSON.stringify(normalized, null, 2), 'utf-8');
+        fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(normalized, null, 2), 'utf-8');
+        fs.renameSync(settingsPath + '.tmp', settingsPath);
         return true;
     } catch (e: any) {
         console.warn(`[audio] Failed to write audio settings: ${e.message}`);
@@ -658,6 +660,9 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:setInputChannel', (_event, channel: number) => {
         audio?.setInputChannel(channel);
     });
+    ipcMain.handle('audio:getInputChannelSnapshot', () => audio?.getInputChannelSnapshot?.() ?? null);
+    ipcMain.handle('audio:confirmInputChannel', (_event, channel: number, generation: number, previous: number) =>
+        confirmInputChannel(audio, channel, generation, previous, readAudioSettings, writeAudioSettings));
 
     ipcMain.handle('audio:setMonitorMute', (_event, mute: boolean) => {
         audio?.setMonitorMute(mute);

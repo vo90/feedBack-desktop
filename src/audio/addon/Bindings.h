@@ -33,6 +33,8 @@ Napi::Value GetBufferSizes(const Napi::CallbackInfo& info);
 Napi::Value GetChainGeneration(const Napi::CallbackInfo& info);
 Napi::Value GetChainState(const Napi::CallbackInfo& info);
 Napi::Value GetCurrentDevice(const Napi::CallbackInfo& info);
+Napi::Value GetInputChannelSnapshot(const Napi::CallbackInfo& info);
+Napi::Value SelectInputChannel(const Napi::CallbackInfo& info);
 Napi::Value GetDeviceMetrics(const Napi::CallbackInfo& info);
 Napi::Value GetDeviceTypes(const Napi::CallbackInfo& info);
 Napi::Value GetLevels(const Napi::CallbackInfo& info);

@@ -14,6 +14,7 @@
 #include "../VSTTrace.h"
 
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -209,6 +210,49 @@ Napi::Value GetCurrentDevice(const Napi::CallbackInfo& info)
             obj.Set("outputAmbiguous", std::count(type.outputDevices.begin(), type.outputDevices.end(), liveEngine->getCurrentOutputDevice()) > 1);
     }
     return obj;
+}
+
+Napi::Value GetInputChannelSnapshot(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto engine = snapshotEngine();
+    if (!engine) return env.Null();
+    const auto snapshot = engine->getInputChannelSnapshot();
+    auto obj = Napi::Object::New(env);
+    obj.Set("generation", static_cast<double>(snapshot.generation));
+    obj.Set("sequence", static_cast<double>(snapshot.sequence));
+    obj.Set("running", snapshot.running);
+    obj.Set("selected", snapshot.selected);
+    obj.Set("deviceName", snapshot.deviceName.toStdString());
+    obj.Set("deviceType", snapshot.deviceType.toStdString());
+    auto channels = Napi::Array::New(env, snapshot.names.size());
+    for (int i = 0; i < snapshot.names.size(); ++i) {
+        auto ch = Napi::Object::New(env);
+        ch.Set("index", i);
+        ch.Set("name", snapshot.names[i].toStdString());
+        ch.Set("peak", snapshot.levels[i].peak);
+        ch.Set("rms", snapshot.levels[i].rms);
+        channels.Set(i, ch);
+    }
+    obj.Set("channels", channels);
+    return obj;
+}
+
+Napi::Value SelectInputChannel(const Napi::CallbackInfo& info)
+{
+    auto env = info.Env();
+    auto engine = snapshotEngine();
+    if (!engine || info.Length() < 3) return Napi::Boolean::New(env, false);
+    double values[3];
+    for (int i = 0; i < 3; ++i) {
+        if (!info[i].IsNumber()) return Napi::Boolean::New(env, false);
+        values[i] = info[i].As<Napi::Number>().DoubleValue();
+        if (!std::isfinite(values[i]) || std::floor(values[i]) != values[i]) return Napi::Boolean::New(env, false);
+    }
+    if (values[0] < -1 || values[0] > INT_MAX || values[1] < 0 || values[1] > 9007199254740991.0
+        || values[2] < -1 || values[2] > INT_MAX) return Napi::Boolean::New(env, false);
+    return Napi::Boolean::New(env, engine->selectInputChannel(
+        static_cast<int>(values[0]), static_cast<uint64_t>(values[1]), static_cast<int>(values[2])));
 }
 
 Napi::Value GetDeviceMetrics(const Napi::CallbackInfo& info)

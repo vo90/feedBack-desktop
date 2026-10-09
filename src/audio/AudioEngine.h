@@ -9,6 +9,7 @@
 #include "engine/DeviceSetup.h"
 #include "engine/SourcePool.h"
 #include "engine/ExtraInputs.h"
+#include "engine/InputChannelMeters.h"
 #include "BackingLeveler.h"
 #include "signalsmith-stretch.h"
 #include <juce_audio_devices/juce_audio_devices.h>
@@ -153,6 +154,27 @@ public:
     // 0=left (dry), 1=right (wet), -1=both (mono mix)
     void setInputChannel(int channel) { source0().setInputChannel(channel); }
     int getInputChannel() const { return source0().getInputChannel(); }
+
+    struct InputChannelSnapshot {
+        uint64_t generation = 0, sequence = 0;
+        bool running = false;
+        int selected = -1;
+        juce::String deviceName, deviceType;
+        juce::StringArray names;
+        std::vector<slopsmith::InputChannelMeters::Level> levels;
+    };
+    InputChannelSnapshot getInputChannelSnapshot();
+    bool selectInputChannel(int channel, uint64_t generation, int previous);
+
+private:
+    std::mutex inputDiscoveryMutex; // never acquired in the realtime callback
+    slopsmith::InputChannelMeters inputChannelMeters;
+    juce::StringArray inputDiscoveryNames;
+    juce::String inputDiscoveryDeviceName, inputDiscoveryDeviceType;
+    inline static std::atomic<uint64_t> nextInputDiscoveryGeneration {0};
+    uint64_t inputDiscoveryGeneration = 0;
+    bool inputDiscoveryRunning = false;
+public:
 
     // Monitor mute — when true, input is still processed (pitch detection, metering)
     // but output is silenced unless there are processors in the signal chain
