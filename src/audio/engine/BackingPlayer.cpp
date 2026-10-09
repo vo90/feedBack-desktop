@@ -26,12 +26,12 @@ std::uint64_t BackingPlayer::scheduleLocked(double position, bool isNewSong) {
     return id;
 }
 
-std::uint64_t BackingPlayer::beginLoad(const std::vector<juce::File>& paths, const std::vector<float>& values, bool fullLast) {
+std::uint64_t BackingPlayer::beginLoad(const std::vector<juce::File>& paths, const std::vector<float>& values, bool fullLast, bool shouldNormalize) {
     if (paths.empty() || paths.size() > BackingSourceQueue::maxSources || paths.size() != values.size()) return 0;
     for (auto value : values) if (!std::isfinite(value) || value < 0 || value > 2) return 0;
     const juce::ScopedLock owner(lock);
     files = paths; gains.fill(0); std::copy(values.begin(), values.end(), gains.begin());
-    fullMixLast = fullLast;
+    fullMixLast = fullLast; normalize = shouldNormalize;
     wantsPlay = false; requestedRate = 1; cachedDuration.store(0); ++songSerial;
     return scheduleLocked(0, true);
 }
@@ -110,7 +110,7 @@ void BackingPlayer::run() {
         Gains values;
         double position, rate, sr;
         int block;
-        bool resetLeveler, fullLast = false;
+        bool resetLeveler, fullLast = false, shouldNormalize = true;
         std::uint64_t song = 0;
         {
             const juce::ScopedLock owner(lock);
@@ -119,14 +119,14 @@ void BackingPlayer::run() {
                 position = requestedPosition; rate = requestedRate; sr = outputRate;
                 block = outputBlock; song = songSerial;
                 resetLeveler = newSong || committedSong != song;
-                fullLast = fullMixLast;
+                fullLast = fullMixLast; shouldNormalize = normalize;
             }
         }
         if (paths.empty()) { wait(5); continue; }
         std::unique_ptr<BackingSession> next;
         bool ok = false;
         try {
-            next = std::make_unique<BackingSession>(paths, sr, block, position, rate, values, fullLast);
+            next = std::make_unique<BackingSession>(paths, sr, block, position, rate, values, fullLast, shouldNormalize);
             const auto deadline = juce::Time::getMillisecondCounterHiRes() + 10000;
             while (!threadShouldExit() && requested.load() == seen) {
                 const auto status = next->prime();

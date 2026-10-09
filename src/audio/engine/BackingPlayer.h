@@ -18,7 +18,7 @@ public:
 
     // Submit on the caller thread to preserve invocation order. Wait only from
     // an async/control worker, never Electron's main thread or an audio callback.
-    std::uint64_t beginLoad(const std::vector<juce::File>&, const std::vector<float>&, bool fullMixLast = false);
+    std::uint64_t beginLoad(const std::vector<juce::File>&, const std::vector<float>&, bool fullMixLast = false, bool normalize = true);
     std::uint64_t beginSeek(double);
     std::uint64_t beginRate(double);
     bool waitForRequest(std::uint64_t);
@@ -58,7 +58,7 @@ private:
     std::atomic<std::uint64_t> requested{0}, completed{0};
     std::uint64_t committed = 0, clockGeneration = 0, songSerial = 0, committedSong = 0;
     bool workerStarted = false;
-    bool fullMixLast = false;
+    bool fullMixLast = false, normalize = true;
     bool buffering = false;
     bool failed = false;
     double drainUntilMs = 0;

@@ -76,7 +76,8 @@ export function createGuidedCalibration(deps: {
                     song, speed, gain, gains, position: deps.audio()?.getBackingPosition() || 0};
                 try {
                     await call('stopBacking');
-                    await call('loadBackingTrack', deps.asset());
+                    // Keep the same native transport/clock, with fixed cue amplitude.
+                    await call('loadBackingTrack', deps.asset(), false);
                     await call('setBackingSpeed', 1);
                     await call('setGain', 'backing', .35);
                     if (identity() !== route) throw new Error('Output changed. Start calibration again.');

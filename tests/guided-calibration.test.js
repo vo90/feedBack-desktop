@@ -18,6 +18,7 @@ test('preserves multistem file selection, gains, speed and position; restores pa
     await f.c.run('loadBackingSession',['/a','/b'],[.2,.8],false);
     await f.c.run('setBackingSpeed',.75); await f.c.run('setBackingSourceGains',[.4,.6]); await f.c.run('setGain','backing',.65);
     const s = await f.c.begin(1); assert.equal(await f.c.run('startBacking'),false);
+    assert.ok(f.calls.some(c => c[0] === 'loadBackingTrack' && c[1] === '/clicks.wav' && c[2] === false));
     await f.c.trial(s.token,1,.2); await f.c.finish(s.token,1);
     assert.deepEqual(f.calls.slice(-5),[['loadBackingSession',['/a','/b'],[.2,.8],false],['setBackingSourceGains',[.4,.6]],['setBackingSpeed',.75],['seekBacking',42],['setGain','backing',.65]]);
     assert.deepEqual(f.saved,[]); assert.equal(f.c.active,false);
@@ -51,4 +52,6 @@ test('authored PCM cue has bounded amplitude, exact duration and silence between
     const b=calibrationWave(); assert.equal(b.length,44+48000*10*2); assert.equal(b.toString('ascii',0,4),'RIFF');
     for (const seconds of [0,1,3,4,6,7,9]) assert.equal(b.readInt16LE(44+seconds*48000*2),0);
     assert.notEqual(b.readInt16LE(44+(2*48000+24)*2),0);
+    const cue = seconds => b.subarray(44 + seconds * 48000 * 2, 44 + (seconds * 48000 + 720) * 2);
+    assert.deepEqual(cue(2), cue(5)); assert.deepEqual(cue(2), cue(8));
 });

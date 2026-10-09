@@ -31,6 +31,37 @@ static std::vector<float> render(BackingSession& session, const BackingSession::
     assert(false); return {};
 }
 int main() {
+    // The normalizer learns from sparse clicks and boosts later cues. A
+    // calibration session must keep their authored amplitude across replay.
+    juce::TemporaryFile clicks(".wav");
+    {
+        auto stream = clicks.getFile().createOutputStream();
+        juce::WavAudioFormat format;
+        auto writer = std::unique_ptr<juce::AudioFormatWriter>(format.createWriterFor(stream.release(), 48000, 1, 16, {}, 0));
+        assert(writer);
+        juce::AudioBuffer<float> buffer(1, 480000); buffer.clear();
+        for (int second : {2, 5, 8}) for (int i = 0; i < 720; ++i)
+            buffer.setSample(0, second * 48000 + i, static_cast<float>(15000.0 / 32768 * std::min(1.0, i / 24.0)
+                * std::exp(-i / 140.0) * std::sin(2 * juce::MathConstants<double>::pi * 1600 * i / 48000)));
+        assert(writer->writeFromAudioSampleBuffer(buffer, 0, 480000));
+    }
+    BackingSession::Gains unity{}; unity[0] = 1;
+    BackingSession calibration({clicks.getFile()}, 48000, 257, 0, 1, unity, false, false);
+    BackingSession music({clicks.getFile()}, 48000, 257, 0, 1, unity);
+    const auto raw = render(calibration, unity), normalized = render(music, unity);
+    auto peak = [](const std::vector<float>& audio, int second) {
+        float result = 0;
+        for (int i = second * 48000; i < second * 48000 + 720; ++i) result = std::max(result, std::abs(audio[i]));
+        return result;
+    };
+    assert(std::abs(peak(raw, 2) - peak(raw, 5)) < .0001f);
+    assert(std::abs(peak(raw, 2) - peak(raw, 8)) < .0001f);
+    assert(peak(normalized, 5) > peak(normalized, 2) * 1.1f);
+    BackingSession replay({clicks.getFile()}, 48000, 257, 0, 1, unity, false, false);
+    replay.retainLeveler(calibration);
+    assert(render(replay, unity) == raw);
+    std::cout << "click peaks: fixed " << peak(raw, 2) << ", " << peak(raw, 5) << ", " << peak(raw, 8)
+              << "; normalizer " << peak(normalized, 2) << ", " << peak(normalized, 5) << ", " << peak(normalized, 8) << "\n";
     juce::TemporaryFile fixture(".wav");
     constexpr int frames = 48013;
     {

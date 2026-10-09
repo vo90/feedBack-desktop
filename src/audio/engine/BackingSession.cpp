@@ -4,8 +4,8 @@
 
 namespace slopsmith {
 BackingSession::BackingSession(const std::vector<juce::File>& files, double sampleRate,
-    int blockSize, double position, double speed, const Gains& gains, bool fullMixLast)
-    : sr(sampleRate), rate(speed), block(blockSize), bypass(std::abs(speed - 1) < 1e-4), start(position), currentGains(gains) {
+    int blockSize, double position, double speed, const Gains& gains, bool fullMixLast, bool shouldNormalize)
+    : sr(sampleRate), rate(speed), block(blockSize), bypass(std::abs(speed - 1) < 1e-4), normalize(shouldNormalize), start(position), currentGains(gains) {
     if (!std::isfinite(sr) || sr < 8000 || sr > 384000 || block <= 0 || block > 16384
         || !std::isfinite(rate) || rate < .01 || rate > 4)
         throw std::invalid_argument("Unsupported backing session format");
@@ -59,7 +59,8 @@ BackingSession::Result BackingSession::process(int frames, const Gains& gains, b
     currentGains = gains;
     if (!bypass) stretch.process(input.getArrayOfReadPointers(), pull, output.getArrayOfWritePointers(), frames);
     if (!discard) {
-        leveler.process(output, frames, -12.0f);
+        // Calibration cues need fixed amplitude; songs retain normalization.
+        if (normalize) leveler.process(output, frames, -12.0f);
         rendered += frames;
     }
     return Result::audio;

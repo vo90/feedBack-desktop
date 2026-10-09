@@ -12,7 +12,7 @@ public:
     using Gains = std::array<float, BackingSourceQueue::maxSources>;
     enum class Result { audio, waiting, ended, failed };
     BackingSession(const std::vector<juce::File>& files, double sampleRate, int blockSize,
-                   double position, double rate, const Gains& gains, bool fullMixLast = false);
+                   double position, double rate, const Gains& gains, bool fullMixLast = false, bool normalize = true);
     Result prime(); // preparation worker; call until audio/failed
     Result render(int frames, const Gains& gains); // callback; bounded, no I/O
     const juce::AudioBuffer<float>& buffer() const { return output; }
@@ -31,7 +31,7 @@ private:
     Result process(int frames, const Gains& gains, bool discard);
     const double sr, rate;
     const int block;
-    const bool bypass;
+    const bool bypass, normalize;
     double start = 0, fraction = 0;
     std::uint64_t rendered = 0, totalOutput = 0;
     int primeState = 0, discarded = 0;

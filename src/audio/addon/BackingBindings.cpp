@@ -64,11 +64,13 @@ Napi::Value LoadBackingTrack(const Napi::CallbackInfo& info)
 {
     auto env = info.Env();
     auto liveEngine = snapshotEngine();
-    if (!liveEngine || info.Length() < 1 || !info[0].IsString()) return Napi::Boolean::New(env, false);
+    if (!liveEngine || info.Length() < 1 || !info[0].IsString()
+        || (info.Length() > 1 && !info[1].IsBoolean())) return Napi::Boolean::New(env, false);
 
     auto path = info[0].As<Napi::String>().Utf8Value();
     if (!juce::File::isAbsolutePath(path)) return Napi::Boolean::New(env, false);
-    return waitForBacking(env, liveEngine, liveEngine->beginBackingSession({juce::File(juce::String(path))}, {1}));
+    return waitForBacking(env, liveEngine, liveEngine->beginBackingSession({juce::File(juce::String(path))}, {1}, false,
+        info.Length() < 2 || info[1].As<Napi::Boolean>().Value()));
 }
 
 Napi::Value LoadBackingSession(const Napi::CallbackInfo& info) {

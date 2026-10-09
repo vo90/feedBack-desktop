@@ -213,8 +213,8 @@ public:
         currentBackingLevel.store(0.0f);
         return backing.load(file);
     }
-    std::uint64_t beginBackingSession(const std::vector<juce::File>& files, const std::vector<float>& gains, bool fullMixLast = false)
-    { return backing.beginLoad(files, gains, fullMixLast); }
+    std::uint64_t beginBackingSession(const std::vector<juce::File>& files, const std::vector<float>& gains, bool fullMixLast = false, bool normalize = true)
+    { return backing.beginLoad(files, gains, fullMixLast, normalize); }
     std::uint64_t beginBackingSeek(double position) { return backing.beginSeek(position); }
     std::uint64_t beginBackingRate(double rate) { return backing.beginRate(rate); }
     bool waitForBackingRequest(std::uint64_t id) { return backing.waitForRequest(id); }
