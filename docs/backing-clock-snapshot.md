@@ -25,6 +25,28 @@ WebContents destruction release timers and listeners. The publisher never runs
 on the real-time audio thread. Polled observations remain available for clock
 calibration and compatibility with Core builds without subscriptions.
 
+For a bounded delivery trace, call
+`await feedBackDesktop.audio.setBackingClockDiagnostics(true)` before a capture,
+then call it with `false` and pull
+`await feedBackDesktop.audio.getBackingClockDiagnostics()` afterward. The trace
+is off by default. Enabling clears the previous capture; disabling retains it.
+Each process keeps at most 4096 rows in chronological order, reports the number
+dropped, and adds no per-observation IPC or logging. Main-frame navigation or
+renderer destruction releases the main trace. Late poll responses from an older
+capture are excluded from a new capture.
+
+Main `stream-publish` rows record timer entry, read end, dispatch and send end.
+`expectedAtMs` is the previous observed tick's entry plus 50 ms (null on the
+first tick), so its difference from `startedAtMs` measures callback cadence
+delay; `readEndedAtMs - startedAtMs` measures the snapshot read. Main `poll-read`
+rows bracket the corresponding polled read. Preload `stream-receive` rows record
+receipt, subscription-token acceptance and callback completion; `poll-receive`
+rows bracket the renderer request/response. Match observations using their
+native `sequence`, `generation`, and main `readAtMs`. The result names each
+process's `clockId`; timestamps from different clock domains require the same
+offset calibration as playback and must not be directly subtracted. This trace
+does not report Core's later sequence, generation or clock-map rejection reasons.
+
 All publishers already hold BackingPlayer's lock: controls acquire it, while audio
 callbacks publish only after their existing try-lock succeeds. Atomic payload
 fields plus an odd/even sequence produce a coherent read without a C++ data race.

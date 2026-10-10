@@ -28,6 +28,7 @@ import type { StartupStatus } from './python';
 // bundle never drags in config-reset's electron/python/fs dependencies.
 import type { ResetSelection, ResetSummary } from './config-reset';
 import type { ConfigPathCategories } from './config-paths';
+import { createClockTrace, clockSnapshotFields } from './backing-clock-diagnostics';
 
 type BackingSnapshot = {
     version: 1; valid: boolean; position: number; ageMs: number;
@@ -37,6 +38,7 @@ type BackingSnapshot = {
     clockId?: number; readAtMs?: number; readUncertaintyMs?: number;
 };
 let backingSnapshotToken = 0;
+const backingClockTrace = createClockTrace();
 
 // Shape returned by maintenance.getPaths() — the enumerated per-OS categories
 // plus the resolved active CONFIG_DIR and a flag for the shared Docker dir.
@@ -541,13 +543,42 @@ const feedBackDesktopApi = {
         stopBacking: () => ipcRenderer.invoke('audio:stopBacking'),
         seekBacking: (seconds: number) => ipcRenderer.invoke('audio:seekBacking', seconds),
         getBackingPosition: (): Promise<number> => ipcRenderer.invoke('audio:getBackingPosition'),
-        getBackingSnapshot: (): Promise<BackingSnapshot | null> => ipcRenderer.invoke('audio:getBackingSnapshot'),
+        setBackingClockDiagnostics: async (enabled: boolean): Promise<boolean> => {
+            if (typeof enabled !== 'boolean') return false;
+            const accepted = await ipcRenderer.invoke('audio:setBackingClockDiagnostics', enabled);
+            if (accepted) backingClockTrace.setEnabled(enabled);
+            return accepted;
+        },
+        getBackingClockDiagnostics: async () => ({
+            renderer: { clockId: performance.timeOrigin, ...backingClockTrace.read() },
+            main: await ipcRenderer.invoke('audio:getBackingClockDiagnostics'),
+        }),
+        getBackingSnapshot: (): Promise<BackingSnapshot | null> => {
+            if (!backingClockTrace.enabled) return ipcRenderer.invoke('audio:getBackingSnapshot');
+            const sentAtMs = performance.now(), capture = backingClockTrace.capture;
+            return ipcRenderer.invoke('audio:getBackingSnapshot').then((snapshot: BackingSnapshot | null) => {
+                backingClockTrace.record({ kind: 'poll-receive', sentAtMs, receivedAtMs: performance.now(),
+                    ...clockSnapshotFields(snapshot) }, capture);
+                return snapshot;
+            }, (error: unknown) => {
+                backingClockTrace.record({ kind: 'poll-error', sentAtMs, receivedAtMs: performance.now() }, capture);
+                throw error;
+            });
+        },
         getBackingAnalysis: (): Promise<Float32Array | null> => ipcRenderer.invoke('audio:getBackingAnalysis'),
         subscribeBackingSnapshots: (callback: (snapshot: BackingSnapshot) => void): (() => void) => {
             const token = ++backingSnapshotToken;
             let active = true;
             const listener = (_event: unknown, receivedToken: number, snapshot: BackingSnapshot) => {
-                if (active && receivedToken === token) callback(snapshot);
+                if (!backingClockTrace.enabled) {
+                    if (active && receivedToken === token) callback(snapshot);
+                    return;
+                }
+                const receivedAtMs = performance.now(), acceptedToken = active && receivedToken === token;
+                try { if (acceptedToken) callback(snapshot); }
+                finally { backingClockTrace.record({ kind: 'stream-receive', token: receivedToken,
+                    expectedToken: token, acceptedToken, receivedAtMs, callbackEndedAtMs: performance.now(),
+                    ...clockSnapshotFields(snapshot) }); }
             };
             ipcRenderer.on('audio:backingSnapshot', listener);
             ipcRenderer.send('audio:subscribeBackingSnapshots', token);

@@ -16,8 +16,9 @@ mod._compile(compiled, helperPath);
 const {readBackingSnapshot, createBackingClockPublisher} = mod.exports;
 const source = fs.readFileSync(path.join(__dirname, '../src/main/audio-bridge.ts'), 'utf8');
 const handler = source.match(/ipcMain\.handle\('audio:getBackingSnapshot', (.+)\);/)[1];
-const read = (audio, clock) => new Function('audio', 'readBackingSnapshot', `return (${handler})();`)(
-    audio, source => readBackingSnapshot(source, clock));
+const read = (audio, clock) => new Function('audio', 'readBackingSnapshot', 'clockDiagnostics',
+    `return (${handler})({sender: {}});`)(audio, source => readBackingSnapshot(source, clock),
+    {read: (_sender, read) => read()});
 test('snapshot capability is null before engine load and for downlevel addons', () => {
     assert.equal(read(null), null);
     assert.equal(read({getBackingPosition: () => 42}), null);
@@ -83,7 +84,7 @@ test('preload filters subscription tokens and removes callbacks exactly once', (
     }).outputText;
     const ipcRenderer = new EventEmitter(), sent = [], observations = [];
     ipcRenderer.send = (...args) => sent.push(args);
-    const context = vm.createContext({ipcRenderer}); vm.runInContext(code, context);
+    const context = vm.createContext({ipcRenderer, backingClockTrace: {enabled: false}}); vm.runInContext(code, context);
     const stop = context.api.subscribeBackingSnapshots(value => observations.push(value));
     const queued = ipcRenderer.listeners('audio:backingSnapshot')[0];
     ipcRenderer.emit('audio:backingSnapshot', {}, 999, 'wrong');

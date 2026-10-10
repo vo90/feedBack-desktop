@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import type { WebContents } from 'electron';
+import type { createClockTrace } from './backing-clock-diagnostics';
 
 type SnapshotSource = { getBackingSnapshot?: () => Record<string, unknown> | null };
 type MonotonicClock = { now(): number; timeOrigin: number };
@@ -31,6 +32,8 @@ export function createBackingClockPublisher(
     read: () => Record<string, unknown> | null,
     schedule = setInterval,
     cancel = clearInterval,
+    traceFor?: (sender: WebContents) => ReturnType<typeof createClockTrace> | undefined,
+    clock: MonotonicClock = performance,
 ) {
     const active = new Map<number, {token: number; stop: () => void}>();
     return {
@@ -49,12 +52,36 @@ export function createBackingClockPublisher(
             const navigate = (_event: unknown, _url: string, inPlace: boolean, mainFrame: boolean) => {
                 if (mainFrame && !inPlace) stop();
             };
+            let dueAtMs: number | null = null, traceCapture = 0;
             const tick = () => {
                 if (sender.isDestroyed()) { stop(); return; }
+                const trace = traceFor?.(sender);
+                const observed = trace?.enabled;
+                const startedAtMs = observed ? clock.now() : 0;
+                const expectedAtMs = traceCapture === trace?.capture ? dueAtMs : null;
+                traceCapture = trace?.capture ?? 0;
+                dueAtMs = observed ? startedAtMs + 50 : null;
+                let readEndedAtMs: number | null = null, dispatchAtMs: number | null = null;
+                let snapshot: Record<string, unknown> | null = null, failed = false;
                 try {
-                    const snapshot = read();
-                    if (snapshot?.valid) sender.send('audio:backingSnapshot', token, snapshot);
-                } catch { stop(); }
+                    snapshot = read();
+                    if (observed) readEndedAtMs = clock.now();
+                    if (snapshot?.valid) {
+                        if (observed) dispatchAtMs = clock.now();
+                        sender.send('audio:backingSnapshot', token, snapshot);
+                    }
+                } catch { failed = true; stop(); }
+                finally {
+                    if (observed) trace.record({ kind: 'stream-publish', token, expectedAtMs, startedAtMs,
+                        readEndedAtMs, dispatchAtMs, endedAtMs: clock.now(), failed,
+                        valid: snapshot?.valid === true,
+                        sequence: typeof snapshot?.sequence === 'number' ? snapshot.sequence : null,
+                        generation: typeof snapshot?.generation === 'number' ? snapshot.generation : null,
+                        position: typeof snapshot?.position === 'number' ? snapshot.position : null,
+                        readAtMs: typeof snapshot?.readAtMs === 'number' ? snapshot.readAtMs : null,
+                        readUncertaintyMs: typeof snapshot?.readUncertaintyMs === 'number' ? snapshot.readUncertaintyMs : null,
+                        nativeAgeMs: typeof snapshot?.ageMs === 'number' ? snapshot.ageMs : null });
+                }
             };
             active.set(sender.id, {token, stop});
             sender.once('destroyed', stop);

@@ -10,6 +10,7 @@ import { isDebugEnabled, getDebugLogPath } from './debug-log';
 import { initVstCrashGuard, armSentinel, disarmSentinel, armEditorSentinel, getSentinelPath } from './vst-crash-guard';
 import { createAudioEffectsExecutor } from './audio-effects-executor';
 import { readBackingSnapshot, createBackingClockPublisher } from './backing-clock';
+import { createBackingClockTraceRegistry } from './backing-clock-diagnostics';
 import { createRendererAudioPortBridge } from './renderer-audio-port';
 import { readAudioRouteTiming } from './audio-route-timing';
 import { resolveVerifierTiming } from './verifier-timing';
@@ -1430,9 +1431,13 @@ export function initAudioBridge(): void {
     ipcMain.handle('audio:stopBacking', () => guided.run('stopBacking'));
     ipcMain.handle('audio:seekBacking', (_event, seconds: number) => guided.run('seekBacking', seconds));
     ipcMain.handle('audio:getBackingPosition', () => audio?.getBackingPosition() ?? 0);
-    ipcMain.handle('audio:getBackingSnapshot', () => readBackingSnapshot(audio));
+    const clockDiagnostics = createBackingClockTraceRegistry();
+    ipcMain.handle('audio:setBackingClockDiagnostics', (event, enabled: unknown) => clockDiagnostics.setEnabled(event.sender, enabled));
+    ipcMain.handle('audio:getBackingClockDiagnostics', event => clockDiagnostics.snapshot(event.sender));
+    ipcMain.handle('audio:getBackingSnapshot', event => clockDiagnostics.read(event.sender, () => readBackingSnapshot(audio)));
     ipcMain.handle('audio:getBackingAnalysis', () => audio?.getBackingAnalysis?.() ?? null);
-    const backingClockPublisher = createBackingClockPublisher(() => readBackingSnapshot(audio));
+    const backingClockPublisher = createBackingClockPublisher(() => readBackingSnapshot(audio),
+        setInterval, clearInterval, sender => clockDiagnostics.forSender(sender));
     ipcMain.on('audio:subscribeBackingSnapshots', (event, token: number) => backingClockPublisher.start(event.sender, token));
     ipcMain.on('audio:unsubscribeBackingSnapshots', (event, token: number) => backingClockPublisher.stop(event.sender, token));
     ipcMain.handle('audio:getBackingDuration', () => audio?.getBackingDuration() ?? 0);
