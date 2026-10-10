@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -14,6 +15,13 @@ double susGraceFor(double sus)
     return std::min(std::max(sus, 0.0), 1.0);
 }
 
+double windowDeadline(const NoteVerifier::ChartNote& note, double tolerance)
+{
+    const double grace = note.harmonicTarget.feedback() || note.whammy.present()
+        ? 0 : susGraceFor(note.sus);
+    return note.t + note.harmonicContact.attackEnd(tolerance, grace);
+}
+
 // A push older than this means the renderer's detect tick has stopped (plugin
 // disabled, song unloaded, renderer wedged) — freeze the playhead rather than
 // let interpolation run a clock away from reality. ~20 missed 50 ms ticks.
@@ -23,6 +31,10 @@ constexpr double kPlayheadStaleMs = 1000.0;
 // seek-back, not push-to-push interpolation jitter (bounded by the ~50 ms
 // tick). Notes at/after the new position are re-opened for re-scoring.
 constexpr double kBackwardJumpSeconds = 0.25;
+
+// Highly unordered charts are cheaper to scan directly. Normal producer
+// payloads have one or two chronological runs (singles, then chords).
+constexpr size_t kMaxScanRanges = 64;
 } // namespace
 
 // ── Background scoring thread ────────────────────────────────────────────────
@@ -57,6 +69,32 @@ void NoteVerifier::setChart(const ChartUpdate& update)
     // Fresh per-note state — nothing is finalized yet for the new chart.
     state.assign(chart.notes.size(), NoteState{});
     pending.clear();
+    scanRanges.clear();
+    // Do not sort the chart: verdict/onset-claim order is observable. Partition
+    // it into chronological runs, then visit those runs in original index order.
+    // Non-finite/reversed windows retain the full scan and its edge semantics.
+    canStopAtFutureNote = true;
+    double previousStart = -std::numeric_limits<double>::infinity();
+    if (!chart.notes.empty()) scanRanges.push_back({0, chart.notes.size(), 0});
+    for (size_t i = 0; i < chart.notes.size(); ++i)
+    {
+        const auto& note = chart.notes[i];
+        const double start = note.t - chart.timingTolerance;
+        const double end = windowDeadline(note, chart.timingTolerance);
+        if (!std::isfinite(start) || !std::isfinite(end) || end < start
+            || (start < previousStart && scanRanges.size() >= kMaxScanRanges))
+        {
+            canStopAtFutureNote = false;
+            scanRanges.clear();
+            break;
+        }
+        if (start < previousStart)
+        {
+            scanRanges.back().end = i;
+            scanRanges.push_back({i, chart.notes.size(), i});
+        }
+        previousStart = start;
+    }
     // A new chart means a new song/arrangement: drop the old playhead so the
     // worker waits for the renderer's first push rather than scoring against a
     // stale position. lastPlayhead is worker-only but guarded by `lock` here.
@@ -80,6 +118,8 @@ void NoteVerifier::clearChart()
     chart.notes.clear();
     state.clear();
     pending.clear();
+    scanRanges.clear();
+    canStopAtFutureNote = false;
     // Reset the playhead state too — same as setChart(). Otherwise a
     // clearChart() between songs leaves a stale lastPlayhead/havePushedPlayhead
     // for the worker to score the next setPlayhead() against.
@@ -250,6 +290,7 @@ void NoteVerifier::run()
         if (playhead < lastPlayhead - kBackwardJumpSeconds)
         {
             backwardJump = true;
+            for (auto& range : scanRanges) range.firstUnfinalized = range.begin;
             for (size_t i = 0; i < chart.notes.size() && i < state.size(); ++i)
                 if (chart.notes[i].t >= playhead)
                     state[i] = NoteState{};
@@ -264,39 +305,53 @@ void NoteVerifier::run()
         lastPlayhead = playhead;
 
         const double tol = chart.timingTolerance;
-        for (size_t i = 0; i < chart.notes.size(); ++i)
-        {
-            if (i >= state.size() || state[i].finalized) continue;
-            const auto& cn = chart.notes[i];
-            const double grace = cn.harmonicTarget.feedback() || cn.whammy.present() ? 0 : susGraceFor(cn.sus);
-
-            const double deadline = cn.t + cn.harmonicContact.attackEnd(tol, grace);
-            if (playhead > deadline || (cn.harmonicContact.present() && playhead >= deadline))
-                passedIdx.push_back(i);
-            // Sustain grace extends only the LATE edge — a note rings *after*
-            // its onset, never before. The early edge is the plain timing
-            // tolerance; widening it by `grace` would open a long sustain up
-            // to a second early and let a same-pitch note still ringing from
-            // an earlier strike set everPresent → a false hit.
-            else if (playhead >= cn.t - tol)
+        const auto scan = [&](size_t begin, size_t end) {
+            for (size_t i = begin; i < end; ++i)
             {
-                ChordScorer::Note n{};
-                n.string = cn.string;
-                n.fret = cn.fret;
-                n.hammerOn = cn.ho;
-                n.pullOff = cn.po;
-                n.bend = cn.b;
-                n.slide = cn.sl;
-                n.harmonic = cn.hm;
-                n.harmonicSemitones = cn.harmonicSemitones;
-                n.harmonicTarget = cn.harmonicTarget;
-                n.harmonicContact = cn.harmonicContact;
-                n.whammy = cn.whammy;
-                n.sustain = cn.sus;
-                n.elapsed = std::max(0., playhead - cn.t);
-                batch.push_back({ i, n });
+                if (i >= state.size() || state[i].finalized) continue;
+                const auto& cn = chart.notes[i];
+                // This run's remaining windows are ordered and cannot finish
+                // before they open. No later note in it can score/pass this tick.
+                if (canStopAtFutureNote && playhead < cn.t - tol) break;
+
+                const double deadline = windowDeadline(cn, tol);
+                if (playhead > deadline || (cn.harmonicContact.present() && playhead >= deadline))
+                    passedIdx.push_back(i);
+                // Sustain grace extends only the LATE edge — a note rings *after*
+                // its onset, never before. The early edge is the plain timing
+                // tolerance; widening it by `grace` would open a long sustain up
+                // to a second early and let a same-pitch note still ringing from
+                // an earlier strike set everPresent → a false hit.
+                else if (playhead >= cn.t - tol)
+                {
+                    ChordScorer::Note n{};
+                    n.string = cn.string;
+                    n.fret = cn.fret;
+                    n.hammerOn = cn.ho;
+                    n.pullOff = cn.po;
+                    n.bend = cn.b;
+                    n.slide = cn.sl;
+                    n.harmonic = cn.hm;
+                    n.harmonicSemitones = cn.harmonicSemitones;
+                    n.harmonicTarget = cn.harmonicTarget;
+                    n.harmonicContact = cn.harmonicContact;
+                    n.whammy = cn.whammy;
+                    n.sustain = cn.sus;
+                    n.elapsed = std::max(0., playhead - cn.t);
+                    batch.push_back({ i, n });
+                }
+            }
+        };
+        if (canStopAtFutureNote)
+        {
+            for (auto& range : scanRanges)
+            {
+                while (range.firstUnfinalized < range.end && state[range.firstUnfinalized].finalized)
+                    ++range.firstUnfinalized;
+                scan(range.firstUnfinalized, range.end);
             }
         }
+        else scan(0, chart.notes.size());
     }
 
     // A backward jump stranded the logged onsets in the old song-time range.

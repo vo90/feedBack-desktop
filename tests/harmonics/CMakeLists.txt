@@ -21,6 +21,13 @@ target_compile_definitions(harmonic_contact_test PRIVATE JUCE_STANDALONE_APPLICA
 target_link_libraries(harmonic_contact_test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_dsp)
 add_test(NAME harmonic_contact COMMAND harmonic_contact_test)
 
+add_executable(verifier_scan_test verifier_scan.cpp ../../src/audio/ChordScorer.cpp
+    ../../src/audio/NoteVerifier.cpp ../../src/audio/OnsetDetector.cpp)
+target_include_directories(verifier_scan_test PRIVATE ../../src/audio)
+target_compile_definitions(verifier_scan_test PRIVATE JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_link_libraries(verifier_scan_test PRIVATE juce::juce_core juce::juce_audio_basics juce::juce_dsp)
+add_test(NAME verifier_scan COMMAND verifier_scan_test)
+
 # Optional compilation of the real IPC entry points using already-prepared
 # headers. No downloads, installations or writes to a dependency checkout.
 set(NAPI_HEADERS "" CACHE PATH "Prepared node-addon-api headers")

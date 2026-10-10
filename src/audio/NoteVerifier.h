@@ -127,6 +127,7 @@ public:
     void stop();
 
 private:
+    friend struct NoteVerifierTestAccess;
     void run();
 
     // The playhead the worker should score against right now: the last pushed
@@ -191,6 +192,11 @@ private:
     uint64_t chartEpoch = 0;
     std::vector<NoteState> state;
     std::vector<Verdict> pending;  // verdicts finalized since the last drain
+    // The producer appends chronological singles and chord constituents in
+    // separate runs. Keep their original order, including onset claiming.
+    struct ScanRange { size_t begin = 0, end = 0, firstUnfinalized = 0; };
+    std::vector<ScanRange> scanRanges;
+    bool canStopAtFutureNote = false;
 
     // Renderer-pushed playhead. The timing trio is written by setPlayhead()
     // (N-API thread) and read by currentPlayhead() (worker thread) — both
