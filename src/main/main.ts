@@ -864,8 +864,8 @@ function createWindow(port: number): void {
         closeAllPanes();
     });
 
-    // Dev tools in development
-    if (!app.isPackaged) {
+    // Ordinary dev launches keep DevTools; guarded play/test launches opt out.
+    if (!app.isPackaged && process.env.FEEDBACK_DEV_NO_DEVTOOLS !== '1') {
         mainWindow.webContents.openDevTools({ mode: 'detach' });
     }
 }
