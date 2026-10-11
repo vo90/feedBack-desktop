@@ -865,7 +865,7 @@ function createWindow(port: number): void {
     });
 
     // Ordinary dev launches keep DevTools; guarded play/test launches opt out.
-    if (!app.isPackaged && process.env.FEEDBACK_DEV_NO_DEVTOOLS !== '1') {
+    if (!app.isPackaged && process.env.FEEDBACK_DEV_NO_DEVTOOLS !== '1' && !process.env.FEEDBACK_PAIRED_CONFIG) {
         mainWindow.webContents.openDevTools({ mode: 'detach' });
     }
 }
