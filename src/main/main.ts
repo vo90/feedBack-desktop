@@ -128,6 +128,7 @@ import * as updateManager from './update-manager';
 import type { UpdateChannel } from './update-manager';
 import { installAppMenu } from './app-menu';
 import { sanitizeWindowBounds, MIN_WIDTH, MIN_HEIGHT } from './window-bounds';
+import { selectGpuPolicy } from './gpu-policy';
 import {
     initPaneHosts, closeAllPanes, adoptPaneWindow, paneIdFromFrameName,
     togglePaneWindow, showAllPaneWindows, hideAllPaneWindows,
@@ -253,7 +254,23 @@ if (process.platform === 'win32') {
     // engages. Set before app.whenReady() so it's read during Chromium init.
     // Desktop machines with a single GPU are unaffected (there's nothing to
     // pick); on dual-GPU desktops it likewise selects the discrete card.
-    app.commandLine.appendSwitch('force_high_performance_gpu');
+    // Only an explicit development diagnostic may select the other adapter.
+    // Actual ANGLE selection must still be verified before comparing timings.
+    const gpuPolicy = selectGpuPolicy({
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        requested: process.env.FEEDBACK_DEV_GPU_POLICY,
+        hasHighPerformanceSwitch: app.commandLine.hasSwitch('force_high_performance_gpu'),
+        hasLowPowerSwitch: app.commandLine.hasSwitch('force_low_power_gpu'),
+    })!;
+    app.commandLine.appendSwitch(gpuPolicy.switchName);
+    if (!app.isPackaged) {
+        console.log('[main] GPU policy:', JSON.stringify({
+            requested: process.env.FEEDBACK_DEV_GPU_POLICY || 'default',
+            selected: gpuPolicy.name,
+            developmentOverride: gpuPolicy.developmentOverride,
+        }));
+    }
 }
 
 // Prevent error dialogs from showing when the Python subprocess has issues.
