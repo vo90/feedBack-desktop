@@ -4,11 +4,55 @@
 
 window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
+// Owner-local bridge: never replace the shared native API used by backing and
+// note detection. A captured generation rejects delayed tone work after OFF/ON.
+function createDesktopAmpSimGuard(native, snapshot) {
+    const pending = new Set();
+    const effectWrites = new Set(['clearChain', 'loadVST', 'loadNAMModel', 'loadIR', 'loadPreset',
+        'setSlotState', 'setBypass', 'setMultiBypass', 'setParameter', 'sendMidiToSlot']);
+    const allowed = () => {
+        const state = snapshot();
+        return state.applicable === false || (state.ready === true && state.enabled === true);
+    };
+    const current = generation => allowed() && snapshot().generation === generation;
+    const cancelled = () => Object.assign(new Error('In-app amp sims are disabled or this tone request expired'),
+        { code: 'AMP_SIMS_CANCELLED' });
+    function track(operation) {
+        pending.add(operation);
+        operation.then(() => pending.delete(operation), () => pending.delete(operation));
+        return operation;
+    }
+    function audio(generation = null) {
+        return new Proxy({}, { get(_target, name) {
+            const target = native; // Electron contextBridge freezes its API object.
+            const value = target[name];
+            if (!effectWrites.has(name) || typeof value !== 'function') return value;
+            return (...args) => {
+                const token = generation === null ? snapshot().generation : generation;
+                if (!current(token)) return Promise.reject(cancelled());
+                const operation = Promise.resolve().then(() => {
+                    if (!current(token)) throw cancelled();
+                    return value.apply(target, args);
+                });
+                track(operation);
+                return operation.then(result => {
+                    if (!current(token)) throw cancelled();
+                    return result;
+                });
+            };
+        } });
+    }
+    return { audio, allowed, current, track, task: fn => (...args) => track(fn(...args)),
+        generation: () => snapshot().generation,
+        isCancelled: error => error?.code === 'AMP_SIMS_CANCELLED',
+        async drain() { while (pending.size) await Promise.allSettled([...pending]); } };
+}
+
 (function() {
     'use strict';
 
-    const api = window.feedBackDesktop?.audio;
-    if (!api) {
+    const nativeAudio = window.feedBackDesktop?.audio;
+    if (!nativeAudio) {
         console.error('[audio-engine] Desktop audio API not available — running in browser mode');
         const panel = document.getElementById('audio-engine-panel');
         if (panel) panel.innerHTML = '<div class="p-8 text-center text-slate-400">Audio engine is only available in the Slopsmith Desktop app.</div>';
@@ -22,6 +66,21 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // tone polling, since its closure refs (toneSwitcher, autoSwitchEnabled)
     // are still valid until the next playSong rotates to the new closure.
     const hookState = window.__feedBackDesktopAudioHooks;
+    let legacyAmpSims = { applicable: true, ready: false, enabled: false, generation: 0 };
+    const ampSims = window.feedBack?.ampSims;
+    hookState.ampSnapshot = () => ampSims?.snapshot() || legacyAmpSims;
+    const ampGuard = hookState.ampGuard || createDesktopAmpSimGuard(nativeAudio, () => hookState.ampSnapshot());
+    hookState.ampGuard = ampGuard;
+    const api = ampGuard.audio();
+    const aeAmpSimAudio = () => ampGuard.audio(ampGuard.generation());
+    window._aeAmpSimAudio = aeAmpSimAudio;
+    window._aeAmpSimsAllowed = ampGuard.allowed;
+    window._aeAmpSimsGeneration = ampGuard.generation;
+    window._aeAmpSimsCurrent = ampGuard.current;
+    window._aeTrackAmpWork = ampGuard.track;
+    let ampPanelReady = false;
+    let ampWasEnabled = null;
+    let ampTransition = Promise.resolve();
 
     // ── State ─────────────────────────────────────────────────────────────────
     let audioRunning = false;
@@ -1072,8 +1131,11 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         // preference lives in core /api/settings (set during onboarding and via
         // the "Use in-app amp sims" toggle below); a missing key or failed read is
         // treated as OFF so a flaky backend can't resurrect the buzz.
+        await ampTransition;
+        await ampSims?.whenSettled();
         const _ampSimsEnabled = await aeUseAmpSims();
         ampSimsCheckbox.checked = _ampSimsEnabled;
+        ampWasEnabled = _ampSimsEnabled;
 
         // Auto-load must only ever seed an EMPTY engine. The native chain lives
         // in the Electron main process and survives renderer reloads, screen.js
@@ -1094,7 +1156,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         // redundant native load/unload when the preset immediately replaces the chain, while
         // ensuring a valid chain is always available as a fallback.
         let _defaultLoaded = false;
-        if (_chainAlreadyLive) {
+        if (!_ampSimsEnabled) {
+            if (!ampSims) await aeSuspendAmpSims();
+            console.info('[audio-engine] Amp sims opt-out — internal tone owners suspended.');
+        } else if (_chainAlreadyLive) {
             console.info('[audio-engine] Engine already has a live chain — skipping auto-load (re-evaluation guard).');
         } else if (_ampSimsEnabled) {
             try {
@@ -1102,8 +1167,6 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             } catch (e) {
                 console.error('[audio-engine] Default preset load threw at init; falling back to saved chain:', e);
             }
-        } else {
-            console.info('[audio-engine] Amp sims opt-out — skipping saved tone-chain restore (own-rig monitoring).');
         }
         if (!_chainAlreadyLive && _ampSimsEnabled && !_defaultLoaded) {
             await aeRestoreSavedChain();
@@ -1111,17 +1174,69 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
         aeApplyNoiseGateToEngine();
         aeApplyTonePolishToEngine();
+        ampPanelReady = true;
+    }
+
+    async function aeDrainAmpSims() {
+        window._aeStopToneMonitor?.();
+        stopToneMonitor();
+        if (hookState.toneAutoMonitor) clearInterval(hookState.toneAutoMonitor);
+        hookState.toneAutoMonitor = null;
+        if (hookState.toneReapplyDebounceTimer) clearTimeout(hookState.toneReapplyDebounceTimer);
+        if (hookState.toneReapplyFollowupTimer) clearTimeout(hookState.toneReapplyFollowupTimer);
+        toneSwitcher = null;
+        window._toneSwitcher = null;
+        window._toneMappingsDirty = true;
+        hookState.toneAutoLoadGeneration = (hookState.toneAutoLoadGeneration || 0) + 1;
+        window._aeEndChainRebuildGuard?.();
+        // The native mutation already issued may finish after OFF. Drain it
+        // before the final clear; no device, transport, detector or saved-chain writes.
+        await ampGuard.drain();
+    }
+
+    async function aeClearAmpSims() {
+        if (await nativeAudio.clearChain() === false) throw new Error('Unable to clear the live tone chain');
+        _renderEmptyChain();
+    }
+
+    async function aeSuspendAmpSims() {
+        await aeDrainAmpSims();
+        await aeClearAmpSims();
+    }
+
+    async function aeAmpSimsChanged(state) {
+        const enabled = state.applicable === false || (state.ready && state.enabled);
+        const previous = ampWasEnabled;
+        ampWasEnabled = enabled;
+        if (ampSimsCheckbox) ampSimsCheckbox.checked = enabled;
+        if (!enabled) {
+            // Stop polling synchronously, before any other subscriber can await.
+            window._aeStopToneMonitor?.();
+            return aeDrainAmpSims();
+        }
+        if (previous === false && ampPanelReady) {
+            if (!window._aeHasProviderManagedChain?.()) {
+                const loaded = await loadDefaultPreset('amp-sims-optin');
+                if (!loaded && ampGuard.allowed()) await aeRestoreSavedChain();
+            }
+            if (ampGuard.allowed() && getCurrentSongKey()) {
+                await applyToneMappingsNow(getCurrentSongKey());
+            }
+        }
     }
 
     // Read the core "use in-app amp sims" preference (feedBack-desktop#46).
     // Default OFF — a missing key or any read failure is treated as opt-OUT so a
     // flaky/late backend never resurrects the idle amp-sim buzz for own-rig users.
     async function aeUseAmpSims() {
+        if (ampSims) return ampGuard.allowed();
         try {
             const r = await fetch('/api/settings');
             if (!r.ok) return false;
             const s = await r.json();
-            return !!(s && s.use_amp_sims === true);
+            legacyAmpSims = { applicable: true, ready: true, enabled: s?.use_amp_sims === true,
+                generation: legacyAmpSims.generation + 1 };
+            return legacyAmpSims.enabled;
         } catch (e) {
             console.warn('[audio-engine] use_amp_sims read failed; assuming opt-out:', e);
             return false;
@@ -1133,6 +1248,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // opt-in toggle. Each item failure is contained so one bad plugin can't abort
     // the rest of the chain.
     async function aeRestoreSavedChain() {
+        if (!ampGuard.allowed()) return;
+        const api = aeAmpSimAudio();
         let savedChain;
         try {
             savedChain = JSON.parse(localStorage.getItem('slopsmith-signal-chain') || '[]');
@@ -1165,6 +1282,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     await api.loadIR(item.path);
                 }
             } catch (e) {
+                if (ampGuard.isCancelled(e)) return;
                 console.error('[audio-engine] Failed to restore chain item:', item, e);
             }
         }
@@ -1792,36 +1910,29 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         //         restores the same tone — so we deliberately do NOT saveChainState().
         ampSimsCheckbox.addEventListener('change', async () => {
             const on = ampSimsCheckbox.checked;
+            ampSimsCheckbox.disabled = true;
             try {
-                const r = await fetch('/api/settings', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ use_amp_sims: on }),
-                });
-                if (!r.ok) console.warn('[audio-engine] use_amp_sims persist HTTP', r.status);
-            } catch (e) { console.warn('[audio-engine] use_amp_sims persist failed:', e); }
-            try {
-                if (on) {
-                    // loadDefaultPreset → replaceChainWithPresetBlob clears first; if
-                    // there's no default preset it returns false WITHOUT clearing, so
-                    // clear explicitly before the saved-chain restore to avoid stacking
-                    // a duplicate chain on top of whatever is already loaded.
-                    let _loaded = false;
-                    try { _loaded = await loadDefaultPreset('amp-sims-optin'); }
-                    catch (e) { console.error('[audio-engine] default preset load failed on opt-in:', e); }
-                    if (!_loaded) {
-                        await api.clearChain();
-                        await aeRestoreSavedChain();
-                    }
+                if (ampSims) {
+                    // Core publishes OFF immediately, drains every tone owner, then
+                    // resolves. ON restores through the subscription exactly once.
+                    await ampSims.setEnabled(on);
                 } else {
-                    // Silence the live monitor now. Keep localStorage so ON restores it.
-                    await api.clearChain();
-                    // Render the empty chain directly — do NOT call refreshChain()/
-                    // getChainState() right after clearChain(); some JUCE bridges crash
-                    // on that sequence (see clearChainForNewSong).
-                    const _c = chainContainer || $('ae-chain');
-                    if (_c) _c.innerHTML = '<div class="text-sm text-slate-500 italic">No processors loaded — add a VST, NAM model, or cabinet IR</div>';
+                    const r = await fetch('/api/settings', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ use_amp_sims: on }),
+                    });
+                    if (!r.ok) throw new Error(`use_amp_sims persist HTTP ${r.status}`);
+                    legacyAmpSims = { applicable: true, ready: true, enabled: on,
+                        generation: legacyAmpSims.generation + 1 };
+                    await aeAmpSimsChanged(legacyAmpSims);
                 }
-            } catch (e) { console.error('[audio-engine] amp-sim toggle apply failed:', e); }
+                if (!on && !ampSims) await aeClearAmpSims();
+            } catch (e) {
+                console.error('[audio-engine] amp-sim toggle apply failed:', e);
+            } finally {
+                ampSimsCheckbox.checked = ampGuard.allowed();
+                ampSimsCheckbox.disabled = false;
+            }
         });
 
         // Gain sliders (UI dB → linear amplitude for engine)
@@ -2285,7 +2396,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
      *  tone instead of the plugin default. IIFE 2's toneAutoImpl path has the
      *  same logic inline (the two IIFEs deliberately don't share scope); keep
      *  them in sync if you touch the alignment rules. */
-    async function loadPresetItemsWithState(preset) {
+    async function loadPresetItemsWithState(preset, generation = ampGuard.generation()) {
+        if (!ampGuard.current(generation)) return [];
+        const api = ampGuard.audio(generation);
         const slotIds = [];
         const chainItems = getPresetItems(preset);
         let nativeChain = [];
@@ -2342,6 +2455,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
      *  the previous menu/player chain is fully torn down and sounds cannot stack.
      *  On loadPreset failure the previous chain is restored (best-effort). */
     async function replaceChainWithPresetBlob(preset, logCtx = '', { snapshot = true } = {}) {
+        if (!ampGuard.allowed()) return false;
+        const generation = ampGuard.generation();
+        const api = aeAmpSimAudio();
         if (!preset?.nativePreset) return false;
         const tag = '[audio-engine] replaceChainWithPresetBlob' + (logCtx ? ` (${logCtx})` : '');
 
@@ -2355,7 +2471,9 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
 
         try {
+            if (!ampGuard.current(generation)) return false;
             await api.clearChain();
+            if (!ampGuard.current(generation)) return false;
             // Clean any Rig Builder stages a pre-fix build baked into this saved
             // preset (see aeIsRigBuilderStage). A preset that empties completely
             // was 100% Rig Builder's tone (saved while only RB stages were live)
@@ -2377,6 +2495,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             if (result === false || (result && result.success === false)) {
                 console.error(tag + ': loadPreset failed:', result?.error || 'unknown error');
                 await _restorePresetBlob(snapshotBlob, tag);
+                if (!ampGuard.current(generation)) return false;
                 if (!snapshotBlob) {
                     // No rollback available; chain is now empty — sync localStorage and UI to match.
                     try { localStorage.setItem('slopsmith-signal-chain', '[]'); } catch (_) {}
@@ -2390,12 +2509,15 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             // Share the single getChainState() result between refreshChain and saveChainState
             // to avoid two back-to-back native bridge round-trips.
             const chain = await refreshChain();
+            if (!ampGuard.current(generation)) return false;
             if (Array.isArray(chain)) saveChainStateFromChain(chain);
             else saveChainState();
             return true;
         } catch (e) {
+            if (ampGuard.isCancelled(e) || !ampGuard.current(generation)) return false;
             console.error(tag + ':', e);
             await _restorePresetBlob(snapshotBlob, tag);
+            if (!ampGuard.current(generation)) return false;
             if (!snapshotBlob) {
                 // No rollback available; chain is now empty — sync localStorage and UI to match.
                 try { localStorage.setItem('slopsmith-signal-chain', '[]'); } catch (_) {}
@@ -2411,6 +2533,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     async function _restorePresetBlob(snapshotBlob, tag) {
+        if (!ampGuard.allowed()) return;
+        const api = aeAmpSimAudio();
         if (!snapshotBlob) return;
         try {
             await api.clearChain();
@@ -2429,6 +2553,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     async function loadDefaultPreset(reason = 'manual') {
+        if (!ampGuard.allowed()) return false;
         if ((reason === 'player-exit' || reason === 'song-stop') && isSongTransitioning()) {
             console.log('[audio-engine] Skipping default preset during song transition:', reason);
             return false;
@@ -2549,6 +2674,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
      *  which must never be set on a path that preserved the chain, or a later
      *  preload would treat the preserved chain as already cleared. */
     async function clearChainForNewSong() {
+        if (!ampGuard.allowed()) return false;
+        const api = aeAmpSimAudio();
         if (!api?.clearChain) return false;
         const providerChainActive = window._aeHasProviderManagedChain && window._aeHasProviderManagedChain();
         if (providerChainActive) {
@@ -2656,6 +2783,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
     class ToneSwitcher {
         constructor() {
+            this.ampGeneration = ampGuard.generation();
             this.toneSlotMap = {};      // { toneName: [slotId, ...] }
             this.tonePresetMap = {};    // { toneName: preset }
             this.tonePresetNameMap = {}; // { toneName: presetName } — parallel map for O(1) name lookup
@@ -2663,6 +2791,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
 
         async preloadForSong(toneChanges, toneBase, mappings) {
+            if (!ampGuard.current(this.ampGeneration)) return;
+            const api = ampGuard.audio(this.ampGeneration);
             const changes = Array.isArray(toneChanges) ? toneChanges : [];
             const rawBase = String(toneBase || '').trim();
             const toneNames = new Set();
@@ -2715,7 +2845,8 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 // its default preset when a tone change fired mid-song. The
                 // saved tone (params + loaded model) lives in the native preset
                 // blob and is restored per-slot by loadPresetItemsWithState.
-                const slotIds = await loadPresetItemsWithState(preset);
+                const slotIds = await loadPresetItemsWithState(preset, this.ampGeneration);
+                if (!ampGuard.current(this.ampGeneration)) return;
                 this.toneSlotMap[toneName] = slotIds;
                 this.tonePresetMap[toneName] = preset;
                 this.tonePresetNameMap[toneName] = presetName;
@@ -2739,6 +2870,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
 
         switchToTone(toneName) {
+            if (!ampGuard.current(this.ampGeneration)) return;
             if (toneName === this.activeTone) return;
             if (!this.toneSlotMap[toneName]) return;
 
@@ -3165,11 +3297,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
 
     function startToneMonitor() {
+        if (!ampGuard.allowed()) return;
         // If IIFE2's startToneAutoSwitch is already running its own 50ms polling loop,
         // don't start a parallel interval — both would call switchToTone at 50ms cadence.
         if (window._toneAutoSwitchActive) return;
         if (hookState.toneMonitorInterval) clearInterval(hookState.toneMonitorInterval);
         hookState.toneMonitorInterval = setInterval(() => {
+            if (!ampGuard.allowed()) return;
             if (!toneSwitcher || !autoSwitchEnabled) return;
             const hw = window.highway || window._slopsmithHighway;
             if (!hw || !hw.getTime) return;
@@ -3201,14 +3335,17 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
     let _applyToneMappingsLock = Promise.resolve();
     function applyToneMappingsNow(songKey, options = {}) {
+        const generation = ampGuard.generation();
         const next = _applyToneMappingsLock
             .catch(() => {})
-            .then(() => _applyToneMappingsImpl(songKey, options));
+            .then(() => ampGuard.current(generation) ? _applyToneMappingsImpl(songKey, options) : undefined);
         _applyToneMappingsLock = next.catch(() => {});
         return next;
     }
 
     async function _applyToneMappingsImpl(songKey, options = {}) {
+        if (!ampGuard.allowed()) return;
+        const generation = ampGuard.generation();
         const forceBypass = !!options.forceBypass;
         const changedTone = String(options.changedTone || '').trim();
         const hw = window.highway || window._slopsmithHighway;
@@ -3237,6 +3374,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         }
         const arrangementName = getCurrentArrangementName();
         const normalized = await normalizeTimelineToneData(songKey, rawToneChanges, rawToneBase, arrangementName);
+        if (!ampGuard.current(generation)) return;
         const toneChanges = normalized.toneChanges;
         const toneBase = normalized.toneBase;
         const mappings = getToneMappings(songKey);
@@ -3252,6 +3390,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             const arrangementToneNames = normalized.originalNames.length > 0
                 ? normalized.originalNames
                 : await getOriginalToneNames(songKey, arrangementName);
+            if (!ampGuard.current(generation)) return;
             const targetTone =
                 changedTone ||
                 arrangementToneNames.find(n => !!findMappingForTone(mappings, n)) ||
@@ -3296,6 +3435,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         toneSwitcher = new ToneSwitcher();
         window._toneSwitcher = toneSwitcher;
         await toneSwitcher.preloadForSong(toneChanges, toneBase, mappings);
+        if (!ampGuard.current(generation)) return;
         if (activeNow) toneSwitcher.switchToTone(activeNow);
         if (autoSwitchEnabled) startToneMonitor();
     }
@@ -4073,6 +4213,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
      *  audio chain stable while crossing tone-change boundaries. */
     class ToneAutomationSwitcher {
         constructor() {
+            this.ampGeneration = ampGuard.generation();
             this.activeTone = null;
             this.activePreset = null;
             this.taSwitcher = true;
@@ -4080,6 +4221,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             this._pendingTone = null; // latest request that arrived while locked (coalesced)
         }
         async switchToTone(name) {
+            if (!ampGuard.current(this.ampGeneration)) return;
             const input = String(name || '').trim();
             if (!input) return;
             this.activeTone = input;
@@ -4090,7 +4232,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             }
             // Drain: process the current request, then any coalesced pending one.
             let current = input;
-            while (current) {
+            while (current && ampGuard.current(this.ampGeneration)) {
                 this._pendingTone = null;
                 this._switchLock = this._doSwitch(current);
                 await this._switchLock;
@@ -4099,6 +4241,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             }
         }
         async _doSwitch(input) {
+            if (!ampGuard.current(this.ampGeneration)) return;
             const cfg = readTaStore();
             const { effectiveName: presetName, autoName, category } = getTaSessionEffectivePreset(input, cfg);
             if (!presetName || presetName === this.activePreset) return;
@@ -4128,6 +4271,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
      *  playback lifecycle when Tone Automation Mode is on. Picks the initial
      *  preset from the song's base tone or falls back to the safe song key. */
     async function installTaSwitcherForSong(songKey, toneChanges, toneBase) {
+        if (!ampGuard.allowed()) return false;
         const cfg = readTaStore();
         if (!cfg.enabled) return false;
         const switcher = new ToneAutomationSwitcher();
@@ -4258,6 +4402,25 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     };
 
     // ── Start ─────────────────────────────────────────────────────────────────
+    // Include whole preset/network workflows in the OFF barrier, not only the
+    // last native call. A queued ON cannot revive an old lookup continuation.
+    aeRestoreSavedChain = ampGuard.task(aeRestoreSavedChain);
+    loadPresetItemsWithState = ampGuard.task(loadPresetItemsWithState);
+    replaceChainWithPresetBlob = ampGuard.task(replaceChainWithPresetBlob);
+    _restorePresetBlob = ampGuard.task(_restorePresetBlob);
+    loadDefaultPreset = ampGuard.task(loadDefaultPreset);
+    clearChainForNewSong = ampGuard.task(clearChainForNewSong);
+    _applyToneMappingsImpl = ampGuard.task(_applyToneMappingsImpl);
+    window._aeLoadDefaultPreset = loadDefaultPreset;
+    window._aeReplaceChainWithPresetBlob = replaceChainWithPresetBlob;
+    window._aeClearChainForNewSong = clearChainForNewSong;
+    hookState.ampSimsUnsubscribe?.();
+    hookState.ampSimsUnsubscribe = ampSims?.subscribe(state => {
+        ampTransition = aeAmpSimsChanged(state);
+        return ampTransition;
+    });
+    hookState.ampSimsFinalizerUnsubscribe?.();
+    hookState.ampSimsFinalizerUnsubscribe = ampSims?.subscribe(aeClearAmpSims, { phase: 'finalize' });
     init().then(() => {
         renderPresetList();
         renderToneAutomationSettings();
@@ -4269,18 +4432,17 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // that also closes every open VST editor window).
     if (window.slopsmith?.on && !hookState.toneReapplyHooksInstalled) {
         hookState.toneReapplyHooksInstalled = true;
-        let _reapplyDebounceTimer = null;
-        let _reapplyFollowupTimer = null;
         const scheduleReapply = () => {
+            if (!ampGuard.allowed()) return;
             window._toneMappingsDirty = true;
             const songKey = getCurrentSongKey();
-            if (_reapplyDebounceTimer) clearTimeout(_reapplyDebounceTimer);
-            if (_reapplyFollowupTimer) clearTimeout(_reapplyFollowupTimer);
-            _reapplyDebounceTimer = setTimeout(() => {
+            if (hookState.toneReapplyDebounceTimer) clearTimeout(hookState.toneReapplyDebounceTimer);
+            if (hookState.toneReapplyFollowupTimer) clearTimeout(hookState.toneReapplyFollowupTimer);
+            hookState.toneReapplyDebounceTimer = setTimeout(() => {
                 void applyToneMappingsNow(songKey).catch(e => console.warn('[tone-switcher] Reapply (debounce) failed:', e));
                 void refreshTonePanelIfOpen();
             }, 600);
-            _reapplyFollowupTimer = setTimeout(() => {
+            hookState.toneReapplyFollowupTimer = setTimeout(() => {
                 void applyToneMappingsNow(songKey).catch(e => console.warn('[tone-switcher] Reapply (followup) failed:', e));
                 void refreshTonePanelIfOpen();
             }, 1500);
@@ -4371,6 +4533,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     }
     // Called by clearChainForNewSong (IIFE 1) and the preload below.
     window._aeBeginChainRebuildGuard = function () { aeSetMonitorMuteSuppressed(true); };
+    window._aeEndChainRebuildGuard = function () { aeSetMonitorMuteSuppressed(false); };
 
     const MONITOR_MUTE_HINT_DISMISSED_KEY = 'slopsmith-monitor-mute-hint-dismissed';
     function showMonitorMuteHint() {
@@ -4422,6 +4585,10 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     // monitor-mute behaviour; if not, keep the dry guitar audible (leave the
     // suppression on) rather than silencing it, and tell the user why.
     async function resolveChainRebuildGuard() {
+        if (window._aeAmpSimsAllowed?.() === false) {
+            aeSetMonitorMuteSuppressed(false);
+            return;
+        }
         const api = window.feedBackDesktop?.audio;
         if (!api) return;
         const providerRoute = window._aeInspectProviderManagedChain && window._aeInspectProviderManagedChain();
@@ -4482,12 +4649,14 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
     };
 
     function startToneAutoSwitch() {
+        if (window._aeAmpSimsAllowed?.() === false) return;
         if (hookState.toneAutoMonitor) clearInterval(hookState.toneAutoMonitor);
         _lastTone = null;
         _toneSwitcherWarned = false;  // fresh not-ready warning per monitor session
         window._toneAutoSwitchActive = true;
 
         hookState.toneAutoMonitor = setInterval(() => {
+            if (window._aeAmpSimsAllowed?.() === false) return;
             const hw = window.highway || window._slopsmithHighway;
             if (!hw || !hw.getTime) return;
 
@@ -4568,14 +4737,18 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
         },
 
         ready() {
+            if (window._aeAmpSimsAllowed?.() === false) return;
             const generation = hookState.toneAutoLoadGeneration || 0;
+            const ampGeneration = window._aeAmpSimsGeneration?.();
+            const isCurrent = () => hookState.toneAutoLoadGeneration === generation
+                && window._aeAmpSimsCurrent?.(ampGeneration) !== false;
             if (!generation || hookState.toneAutoReadyGeneration === generation) return;
             hookState.toneAutoReadyGeneration = generation;
 
             // Tear down the menu/default chain after load (never await clearChain here — it can re-enter
             // the audio host during startup and crash). The timed preload below rebuilds song presets.
             setTimeout(() => {
-            if (hookState.toneAutoLoadGeneration !== generation) return;
+            if (!isCurrent()) return;
             if (window._aeClearChainForNewSong) {
                 window._aeClearingChainForNewSong = true;
                 void window._aeClearChainForNewSong().then((cleared) => {
@@ -4594,13 +4767,13 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
 
         // Inject Chain button
         setTimeout(() => {
-            if (hookState.toneAutoLoadGeneration !== generation) return;
+            if (!isCurrent()) return;
             if (window._aeInjectPlayerToneButton) window._aeInjectPlayerToneButton();
         }, 500);
 
         // Start tone monitoring and preload presets after WebSocket delivers tone data
-        setTimeout(async () => {
-            if (hookState.toneAutoLoadGeneration !== generation) return;
+        setTimeout(() => (window._aeTrackAmpWork || (operation => operation))((async () => {
+            if (!isCurrent()) return;
             let shouldResolveChainRebuildGuard = false;
             try {
             // Only start the 50ms polling interval when at least one switching mode is on;
@@ -4616,7 +4789,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             }
 
             // Preload presets for tone switching
-            const api = window.feedBackDesktop?.audio;
+            const api = window._aeAmpSimAudio?.() || window.feedBackDesktop?.audio;
             const hw = window.highway || window._slopsmithHighway;
             if (!api || !hw) return;
 
@@ -4701,6 +4874,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                         localStorage.setItem('slopsmith-signal-chain', '[]');
                     } catch (e) { /* ignore */ }
                 } catch (e) {
+                    if (!isCurrent()) return;
                     console.warn('[tone-switcher] preflight clearChain:', e);
                 }
             }
@@ -4710,6 +4884,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
             let toneBase = hw.getToneBase ? hw.getToneBase() : '';
             for (let attempt = 0; attempt < 6 && toneChanges.length === 0 && !toneBase; attempt++) {
                 await new Promise(r => setTimeout(r, 500));
+                if (!isCurrent()) return;
                 toneChanges = hw.getToneChanges ? hw.getToneChanges() : [];
                 toneBase = hw.getToneBase ? hw.getToneBase() : '';
             }
@@ -4788,7 +4963,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                         console.log('[tone-switcher] switchToTone called:', name, 'current:', this.activeTone, 'midiMode:', this.midiMode);
                         if (name === this.activeTone) return;
                         const program = midiMappings[name];
-                        const _api = window.feedBackDesktop?.audio;
+                        const _api = api;
                         console.log('[tone-switcher] program:', program, 'api:', !!_api, 'sendMidi:', !!_api?.sendMidiToSlot, 'slotId:', midiConfig.vstSlotId);
                         if (program !== undefined && _api?.sendMidiToSlot) {
                             _api.sendMidiToSlot(midiConfig.vstSlotId, 0, midiConfig.channel || 1, program);
@@ -4798,7 +4973,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     }
                 };
                 // Send initial PC for base tone
-                const _apiInit = window.feedBackDesktop?.audio;
+                const _apiInit = api;
                 if (midiMappings[toneBase] !== undefined && _apiInit?.sendMidiToSlot) {
                     _apiInit.sendMidiToSlot(midiConfig.vstSlotId, 0, midiConfig.channel || 1, midiMappings[toneBase]);
                 }
@@ -4813,6 +4988,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 const hasTimelineToneData = toneChanges.length > 0 || !!toneBase;
                 if (!hasTimelineToneData) {
                     const toneNames = await window._aeGetOriginalToneNamesForCurrentArrangement?.(songKey) ?? [];
+                    if (!isCurrent()) return;
                     const lookup = (name) => (window._aeResolveTonePresetName
                         ? window._aeResolveTonePresetName(mappings, name)
                         : ((window._aeFindMappingForTone ? window._aeFindMappingForTone(mappings, name) : mappings[name]) || mappings['$default']));
@@ -4937,6 +5113,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 }
 
                 const initialPreset = tonePresetMap[effectiveBase];
+                if (!isCurrent()) return;
                 if (initialPreset) {
                     applyPresetGainLevels(api, initialPreset);
                     applyPresetNoiseGate(api, initialPreset);
@@ -4948,6 +5125,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                     toneSlotMap,
                     tonePresetMap,
                     switchToTone(name) {
+                        if (!isCurrent()) return;
                         if (name === this.activeTone) return;
                         if (!this.toneSlotMap[name]) return;
                         const bypassList = [];
@@ -4978,7 +5156,7 @@ window.__feedBackDesktopAudioHooks = window.__feedBackDesktopAudioHooks || {};
                 // show an empty-chain monitor warning.
                 if (shouldResolveChainRebuildGuard) await resolveChainRebuildGuard();
             }
-        }, 800);
+        })()), 800);
         },
     };
 

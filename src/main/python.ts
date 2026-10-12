@@ -589,6 +589,7 @@ export async function startPython(): Promise<void> {
     // Build environment for Python process
     const pythonEnv: Record<string, string> = {
         ...process.env as Record<string, string>,
+        FEEDBACK_DESKTOP: '1',
         PYTHONPATH: pythonPathEnv,
         CONFIG_DIR: configDir,
         SLOPSMITH_PLUGINS_DIR: pluginsDir,
