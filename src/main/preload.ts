@@ -117,12 +117,19 @@ export interface DeviceConfigResult {
 // bindings. Optional `mt` field on Note isn't read by the scorer
 // (matches JS) but is allowed in the request shape so callers can
 // pass through the same chart-note objects they consume in JS.
-export interface HarmonicTarget {
+export type HarmonicTarget = {
     kind: 'pinch' | 'artificial' | 'tapped' | 'semi' | 'feedback';
     node: number;
     interval: number;
     policy: 'harmonic' | 'mixed' | 'attack_either';
-}
+    basis?: never;
+} | {
+    kind: 'artificial';
+    node: null;
+    interval: 24;
+    policy: 'harmonic';
+    basis: 'source-playback-fallback';
+};
 export interface WhammyExpression {
     version: 1;
     policy: 'optional';

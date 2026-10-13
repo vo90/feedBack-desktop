@@ -16,7 +16,7 @@ struct HarmonicContact
         if (!enabled) return start == 0 && end == 0 && !target.present() && sourceId.empty();
         return std::isfinite(sustain) && std::isfinite(start) && std::isfinite(end)
             && start > 0 && start < end && std::abs(end-sustain) <= .0000011
-            && fret >= 0 && fret <= 48 && target.valid() && target.kind == "artificial"
+            && fret >= 0 && fret <= 48 && target.valid() && target.node.has_value() && target.kind == "artificial"
             && !sourceId.empty() && sourceId.size() <= 512;
     }
     double attackEnd(double tolerance, double grace) const

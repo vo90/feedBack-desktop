@@ -33,6 +33,7 @@ add_test(NAME verifier_scan COMMAND verifier_scan_test)
 set(NAPI_HEADERS "" CACHE PATH "Prepared node-addon-api headers")
 set(NODE_HEADERS "" CACHE PATH "Prepared Node/Electron headers")
 set(AUDIO_THIRD_PARTY "" CACHE PATH "Prepared audio third_party headers")
+set(NODE_LIBRARY "" CACHE FILEPATH "Prepared Node/Electron import library")
 if(NAPI_HEADERS AND NODE_HEADERS)
     add_library(harmonic_bridge_compile OBJECT ../../src/audio/SourceChain.cpp
         ../../src/audio/addon/DeviceBindings.cpp ../../src/audio/addon/DetectionBindings.cpp)
@@ -44,4 +45,17 @@ if(NAPI_HEADERS AND NODE_HEADERS)
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_PLUGINHOST_VST3=1 SLOPSMITH_NAM_SUPPORT=0 SLOPSMITH_ONNX_SUPPORT=0
         NAPI_VERSION=9 NAPI_DISABLE_CPP_EXCEPTIONS SLOPSMITH_AUDIO_ADDON=1)
+endif()
+
+# Exercise the production N-API parser with real JavaScript values. This tiny
+# addon needs no audio device or full engine initialization.
+if(NAPI_HEADERS AND NODE_HEADERS AND NODE_LIBRARY)
+    add_library(harmonic_target_binding MODULE binding.cpp)
+    target_include_directories(harmonic_target_binding PRIVATE "${NAPI_HEADERS}" "${NODE_HEADERS}")
+    target_compile_definitions(harmonic_target_binding PRIVATE NAPI_VERSION=9 NAPI_DISABLE_CPP_EXCEPTIONS)
+    target_link_libraries(harmonic_target_binding PRIVATE "${NODE_LIBRARY}")
+    set_target_properties(harmonic_target_binding PROPERTIES PREFIX "" SUFFIX ".node")
+    find_program(NODE_EXECUTABLE node REQUIRED)
+    add_test(NAME harmonic_target_binding COMMAND "${NODE_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/binding.test.cjs" "$<TARGET_FILE:harmonic_target_binding>")
 endif()

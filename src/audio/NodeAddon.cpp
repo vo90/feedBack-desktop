@@ -375,7 +375,7 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
 
     // Pitch detection
     exports.Set("harmonicTargetVersion", Napi::Function::New(env,
-        [](const Napi::CallbackInfo& info) -> Napi::Value { return Napi::Number::New(info.Env(), 1); }));
+        [](const Napi::CallbackInfo& info) -> Napi::Value { return Napi::Number::New(info.Env(), 2); }));
     exports.Set("harmonicContactVersion", Napi::Function::New(env,
         [](const Napi::CallbackInfo& info) { return Napi::Number::New(info.Env(), 1); }));
     exports.Set("whammyVersion", Napi::Function::New(env,

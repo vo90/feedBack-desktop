@@ -6,6 +6,40 @@
 int main() {
     ChordScorer scorer;
     int checks=0;
+    // The source specifies the sounding partial, but not a reliable touch
+    // position. This must score the same pitch as a canonical fourth partial.
+    const HarmonicTarget fallback{"artificial",std::nullopt,24,"harmonic","source-playback-fallback"};
+    if (!fallback.valid()) throw std::runtime_error("Playback fallback rejected");
+    for (const auto bad : std::vector<HarmonicTarget>{
+        {"artificial",0,24,"harmonic","source-playback-fallback"},
+        {"artificial",5,24,"harmonic","source-playback-fallback"},
+        {"tapped",std::nullopt,24,"harmonic","source-playback-fallback"},
+        {"artificial",std::nullopt,12,"harmonic","source-playback-fallback"},
+        {"artificial",std::nullopt,24,"mixed","source-playback-fallback"},
+        {"artificial",std::nullopt,24,"harmonic"},
+        {"artificial",std::nullopt,24,"harmonic","unknown"}})
+        if (bad.valid()) throw std::runtime_error("Malformed fallback accepted");
+    HarmonicContact ambiguousContact{true,.2,1,fallback,"source:tie"};
+    if (ambiguousContact.valid(1,10)) throw std::runtime_error("Unknown physical contact accepted");
+    for (int capo : {0,2}) for (int drop : {0,-2}) for (bool comb : {false,true})
+    for (int played : {-1,0,12,19,24,28,36}) {
+        ChordScorer::Request req;req.tuningOffsets.assign(6,drop);req.capo=capo;
+        req.harmonicVerify=comb;req.pitchCheckCents=30;req.minHitRatio=1;
+        ChordScorer::Note n;n.string=4;n.fret=10;n.harmonicTarget=fallback;
+        req.notes={n};
+        const double hz=440*std::pow(2.,(59+10+capo+drop+played-69)/12.);
+        std::vector<float> samples(16800);
+        for (size_t i=0;i<samples.size();++i) if (played>=0)
+            samples[i]=(float)(.3*std::sin(2*3.141592653589793*hz*i/48000)
+                +.03*std::sin(4*3.141592653589793*hz*i/48000));
+        const auto result=scorer.scoreChord(samples.data(),(int)samples.size(),48000,req);
+        if(result.isHit!=(played==24) || result.results.size()!=1 || result.results[0].fret!=10)
+            throw std::runtime_error("Fallback pitch/identity check failed");
+        req.notes[0].harmonicTarget={"artificial",5,24,"harmonic"};
+        const auto canonical=scorer.scoreChord(samples.data(),(int)samples.size(),48000,req);
+        if(canonical.isHit!=result.isHit) throw std::runtime_error("Fallback differs from canonical scoring");
+        ++checks;
+    }
     for (const auto bass : {false,true}) for (int capo : {0,2}) for (int drop : {0,-2}) {
         ChordScorer::Request req;
         req.arrangement=bass ? "bass" : "guitar"; req.stringCount=bass ? 4 : 6;

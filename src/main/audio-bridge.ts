@@ -850,8 +850,9 @@ export function initAudioBridge(): void {
     // The trade-off doesn't pay back for this workload — revisit only
     // if profiling shows actual main-loop stalls.
     ipcMain.handle('audio:harmonicTargetVersion', () => {
-        return audio && typeof audio.harmonicTargetVersion === 'function'
-            && audio.harmonicTargetVersion() === 1 ? 1 : 0;
+        const version = audio && typeof audio.harmonicTargetVersion === 'function'
+            ? audio.harmonicTargetVersion() : 0;
+        return version === 1 || version === 2 ? version : 0;
     });
     ipcMain.handle('audio:harmonicContactVersion', () => {
         return audio && typeof audio.harmonicContactVersion === 'function' && audio.harmonicContactVersion() === 1 ? 1 : 0;
