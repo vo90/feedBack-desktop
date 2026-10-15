@@ -453,6 +453,8 @@ function createDesktopAmpSimGuard(native, snapshot) {
                 const wantType = typeInfo && typeInfo.name ? String(typeInfo.name) : '';
                 if (curInput && curInput.trim() === String(inputDevice).trim()
                     && (!wantType || curType === wantType)) {
+                    try { await window.feedBack?.guitarProfiles?.refresh(); }
+                    catch (error) { return { outcome: 'failed', status: 'failed', reason: error?.message || 'Guitar gain could not be applied' }; }
                     return { outcome: 'handled', status: 'open', payload: { boundType: curType || wantType, boundName: curInput, requestedName: inputDevice, alreadyBound: true } };
                 }
             }
@@ -470,6 +472,7 @@ function createDesktopAmpSimGuard(native, snapshot) {
         const ok = typeof result === 'boolean' ? result : !!result?.ok;
         if (!ok) return { outcome: 'failed', status: 'failed', reason: result && result.error ? String(result.error) : 'Native audio device open failed' };
         if (typeof api.startAudio === 'function') await api.startAudio();
+        await window.feedBack?.guitarProfiles?.refresh();
 
         // Read back what the engine ACTUALLY bound, so callers (input_setup's
         // confirmation gate, note_detect) can surface "Now listening to: <device>"
@@ -1110,6 +1113,7 @@ function createDesktopAmpSimGuard(native, snapshot) {
                     await api.startAudio();
                     audioRunning = true;
                     toggleBtn.textContent = 'Stop';
+                    await window.feedBack?.guitarProfiles?.refresh();
                     statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
                     const modeLabel = (typeof result === 'object' && result?.duplex === false)
                         ? ' (split mode)' : '';
@@ -1736,6 +1740,12 @@ function createDesktopAmpSimGuard(native, snapshot) {
                 await api.startAudio();
                 audioRunning = true;
                 toggleBtn.textContent = 'Stop';
+                try { await window.feedBack?.guitarProfiles?.refresh(); }
+                catch (error) {
+                    statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
+                    statusText.textContent = error?.message || 'Guitar gain could not be applied';
+                    return;
+                }
                 statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
                 statusText.textContent = 'Audio running';
                 aeApplyNoiseGateToEngine();
@@ -1807,6 +1817,7 @@ function createDesktopAmpSimGuard(native, snapshot) {
                     await api.startAudio();
                     audioRunning = await api.isAudioRunning();
                     toggleBtn.textContent = audioRunning ? 'Stop' : 'Start';
+                    await window.feedBack?.guitarProfiles?.refresh();
                     return audioRunning ? ' Previous audio setup restored.' : ' Previous device could not restart.';
                 } catch (_) { return ' Previous device could not be restored.'; }
             }
@@ -1844,6 +1855,7 @@ function createDesktopAmpSimGuard(native, snapshot) {
                     await api.startAudio();
                     audioRunning = true;
                     toggleBtn.textContent = 'Stop';
+                    await window.feedBack?.guitarProfiles?.refresh();
                     statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
                     const modeLabel = (typeof result === 'object' && result?.duplex === false)
                         ? ' (split mode)' : '';
@@ -1881,6 +1893,12 @@ function createDesktopAmpSimGuard(native, snapshot) {
                 return;
             }
             await api.setInputChannel(inputChannel);
+            try { await window.feedBack?.guitarProfiles?.refresh(); }
+            catch (error) {
+                statusDot.className = 'w-3 h-3 rounded-full bg-red-500';
+                statusText.textContent = error?.message || 'Guitar gain could not be applied';
+                return;
+            }
             await saveAppliedDeviceSettings({ inputChannel: inputChannelSelect.value });
         });
 
