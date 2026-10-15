@@ -137,6 +137,10 @@ public:
     // Gain controls. Input + chain-output gain are per-source (sources[0]);
     // output gain is the post-mix master and stays engine-global.
     void setInputGain(float gain) { source0().setInputGain(gain); }
+    // Physical-guitar calibration is primary-source only for now. Independent
+    // of setInputGain, which remains the preset/tone drive in profile mode.
+    bool setInputCalibrationGain(double gain) { return source0().setInputCalibrationGain(gain); }
+    float getInputCalibrationGain() const { return source0().getInputCalibrationGain(); }
     // Sanitized (see GainSanitize.h): a NaN/Inf master gain from JS would
     // multiply the whole device output to NaN downstream of the per-source
     // scrub — clamp at the store so every caller is covered.

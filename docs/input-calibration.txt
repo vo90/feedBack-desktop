@@ -1,0 +1,29 @@
+Physical guitar input calibration
+
+audio.setInputCalibrationGain(gain) -> Promise<boolean>
+audio.getInputCalibrationGain() -> Promise<number>
+
+The setter accepts only finite linear gains from 0.1 through 5. A successful
+first call activates profile mode for the primary source (source 0), including
+when gain is 1. Invalid or unsupported calls return false without changing mode.
+The getter returns the target (1 before activation or when unavailable).
+
+Before activation the existing input gain path is unchanged. After activation,
+capture calibration applies once before the pre-gate detector/ML/verifier tap,
+input level meter and post-gate tuner tap. setGain('input') remains independent
+tone/preset drive and applies after those taps, before the effect chain. Native
+input frames are already calibrated; renderer detection must not multiply them
+by the same profile gain. Hardware channel snapshots remain raw observations.
+The existing user noise gate still sits before the tuner and tone chain.
+
+The audio thread ramps capture changes over 10 ms without locks or allocation.
+Device reopen preserves the target; tone loads/resets cannot overwrite it.
+The Core profile owner persists and restores values; Desktop has no profile
+store. Additional simultaneously captured sources keep their legacy behavior;
+source-indexed calibration is a future extension, not implied by this API.
+
+No-device native regression harness:
+  cmake -S tests/input_calibration -B <isolated-build-directory>
+        -DJUCE_SOURCE_DIR=<existing-pinned-JUCE-directory>
+  cmake --build <isolated-build-directory> --config Release
+  ctest --test-dir <isolated-build-directory> -C Release --output-on-failure

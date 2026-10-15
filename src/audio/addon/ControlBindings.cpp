@@ -39,6 +39,20 @@ Napi::Value SetGain(const Napi::CallbackInfo& info)
     return env.Undefined();
 }
 
+Napi::Value SetInputCalibrationGain(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    const bool valid = liveEngine && info.Length() > 0 && info[0].IsNumber();
+    return Napi::Boolean::New(info.Env(), valid
+        && liveEngine->setInputCalibrationGain(info[0].As<Napi::Number>().DoubleValue()));
+}
+
+Napi::Value GetInputCalibrationGain(const Napi::CallbackInfo& info)
+{
+    auto liveEngine = snapshotEngine();
+    return Napi::Number::New(info.Env(), liveEngine ? liveEngine->getInputCalibrationGain() : 1.0f);
+}
+
 Napi::Value SetInputChannel(const Napi::CallbackInfo& info)
 {
     auto liveEngine = snapshotEngine();

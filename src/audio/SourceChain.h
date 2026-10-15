@@ -5,6 +5,7 @@
 #include "TonePolish.h"
 #include "SignalChain.h"
 #include "GainSanitize.h"
+#include "engine/InputCalibrationGain.h"
 #include "PitchDetector.h"
 #include "ChordScorer.h"
 #include "MlNoteDetector.h"
@@ -75,12 +76,14 @@ public:
 
     // ── Per-block processing (audio thread, RT-safe) ──────────────────────────
     // Build this source's mono signal from `inputData` (channel select / mono
-    // mix per selectedInputChannel + inputGain), feed the ML detector + input
+    // mix per selectedInputChannel + capture gain), feed the ML detector + input
     // ring, gate, feed the YIN detector + raw ring, run the tone chain, sanitize,
     // apply monitor mute + chain gain + tone polish — leaving the processed
     // monitor signal in `buffer` (the same in-place semantics as before). For
-    // Phase 0 `buffer` is the device output buffer and `effectiveOutputChannels`
-    // its channel count.
+    // Profile mode uses dedicated calibration for capture, then applies inputGain
+    // as tone drive after the detector/tuner taps. Before activation inputGain
+    // retains its legacy capture behavior. `effectiveOutputChannels` is the
+    // destination channel count, including zero for capture-only setups.
     void processBlock(const float* const* inputData, int numInputChannels,
                       juce::AudioBuffer<float>& buffer, int effectiveOutputChannels,
                       int numSamples) noexcept;
@@ -131,6 +134,8 @@ public:
     // reach the audio thread via either the legacy or the indexed API.
     void setInputGain(float gain) { inputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getInputGain() const { return inputGain.load(); }
+    bool setInputCalibrationGain(double gain) { return inputCalibration.setGain(gain); }
+    float getInputCalibrationGain() const { return inputCalibration.getGain(); }
     void setChainOutputGain(float gain) { chainOutputGain.store(slopsmith::sanitizeMasterGain(gain)); }
     float getChainOutputGain() const { return chainOutputGain.load(); }
     void setInputChannel(int channel) { selectedInputChannel.store(channel); }
@@ -225,6 +230,7 @@ private:
 
     // ── Per-source controls / metering ────────────────────────────────────────
     std::atomic<float> inputGain{1.0f};
+    slopsmith::InputCalibrationGain inputCalibration;
     std::atomic<float> chainOutputGain{1.0f};
     std::atomic<float> currentInputLevel{0.0f};
     std::atomic<float> inputPeak{0.0f};

@@ -108,6 +108,8 @@ using slopsmith::addon::SetChart;
 using slopsmith::addon::SetDevice;
 using slopsmith::addon::SetDeviceType;
 using slopsmith::addon::SetGain;
+using slopsmith::addon::SetInputCalibrationGain;
+using slopsmith::addon::GetInputCalibrationGain;
 using slopsmith::addon::SetInputChannel;
 using slopsmith::addon::SetMonitorKill;
 using slopsmith::addon::SetMonitorMute;
@@ -355,6 +357,8 @@ static Napi::Object InitModule(Napi::Env env, Napi::Object exports)
 
     // Gain
     exports.Set("setGain", Napi::Function::New(env, SetGain));
+    exports.Set("setInputCalibrationGain", Napi::Function::New(env, SetInputCalibrationGain));
+    exports.Set("getInputCalibrationGain", Napi::Function::New(env, GetInputCalibrationGain));
     exports.Set("setInputChannel", Napi::Function::New(env, SetInputChannel));
     exports.Set("setMonitorMute", Napi::Function::New(env, SetMonitorMute));
     exports.Set("setMonitorMuteSuppressed", Napi::Function::New(env, SetMonitorMuteSuppressed));

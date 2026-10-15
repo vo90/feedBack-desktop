@@ -84,6 +84,8 @@ Napi::Value SetChart(const Napi::CallbackInfo& info);
 Napi::Value SetDevice(const Napi::CallbackInfo& info);
 Napi::Value SetDeviceType(const Napi::CallbackInfo& info);
 Napi::Value SetGain(const Napi::CallbackInfo& info);
+Napi::Value SetInputCalibrationGain(const Napi::CallbackInfo& info);
+Napi::Value GetInputCalibrationGain(const Napi::CallbackInfo& info);
 Napi::Value SetInputChannel(const Napi::CallbackInfo& info);
 Napi::Value AcquireMonitorMuteHold(const Napi::CallbackInfo& info);
 Napi::Value ReleaseMonitorMuteHold(const Napi::CallbackInfo& info);

@@ -6,6 +6,10 @@ add_executable(gain_sanitize_test gain_sanitize_test.cpp)
 target_compile_features(gain_sanitize_test PRIVATE cxx_std_17)
 add_test(NAME gain_sanitize COMMAND gain_sanitize_test)
 
+add_executable(input_calibration_gain_test input_calibration_gain_test.cpp)
+target_compile_features(input_calibration_gain_test PRIVATE cxx_std_17)
+add_test(NAME input_calibration_gain COMMAND input_calibration_gain_test)
+
 add_executable(input_channel_meters_test input_channel_meters_test.cpp)
 target_compile_features(input_channel_meters_test PRIVATE cxx_std_17)
 add_test(NAME input_channel_meters COMMAND input_channel_meters_test)

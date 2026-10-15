@@ -319,6 +319,9 @@ const feedBackDesktopApi = {
 
         // Gain
         setGain: (which: string, value: number) => ipcRenderer.invoke('audio:setGain', which, value),
+        // Primary physical guitar's capture calibration. Separate from preset drive.
+        setInputCalibrationGain: (gain: number): Promise<boolean> => ipcRenderer.invoke('audio:setInputCalibrationGain', gain),
+        getInputCalibrationGain: (): Promise<number> => ipcRenderer.invoke('audio:getInputCalibrationGain'),
         setInputChannel: (channel: number) => ipcRenderer.invoke('audio:setInputChannel', channel),
         setMonitorMute: (mute: boolean) => ipcRenderer.invoke('audio:setMonitorMute', mute),
         setMonitorMuteSuppressed: (suppressed: boolean) =>

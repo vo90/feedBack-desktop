@@ -14,6 +14,7 @@
 
 void SourceChain::prepare(double sr, int blockSize)
 {
+    inputCalibration.prepare(sr);
     if (slopsmith_vst_trace::isEnabled())
         fprintf(stderr, "[diag] SourceChain[%d].prepare: sr=%.0f bs=%d\n", sourceId, sr, blockSize);
     // Reset the input rings so a stop→start cycle delivers a clean zero-padded
@@ -58,7 +59,11 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
                                int numSamples) noexcept
 {
     const auto inputReceivedAtMs = juce::Time::getMillisecondCounterHiRes();
-    const float inGain = inputGain.load();
+    const float toneDrive = inputGain.load();
+    const bool calibrated = inputCalibration.beginBlock();
+    // Preserve the old capture-gain behavior until profiles explicitly activate
+    // calibration. Afterwards preset drive belongs only to the monitor/tone path.
+    const float inGain = calibrated ? 1.0f : toneDrive;
     const int selectedCh = selectedInputChannel.load();
 
     // Copy input with gain, handling channel selection. Track how many output
@@ -127,6 +132,14 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
     for (int ch = filledOutputChannels; ch < effectiveOutputChannels; ++ch)
         buffer.clear(ch, 0, numSamples);
 
+    if (calibrated && effectiveOutputChannels > 0)
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float gain = inputCalibration.nextGain();
+            for (int ch = 0; ch < effectiveOutputChannels; ++ch)
+                buffer.setSample(ch, i, buffer.getSample(ch, i) * gain);
+        }
+
     // Metering: input level (pre-processing)
     {
         float peak = 0.0f;
@@ -176,6 +189,9 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
             for (int i = 0; i < numSamples; ++i)
                 inputCaptureScratch[(size_t) i] = inputData[0][i] * inGain;
         }
+        if (calibrated)
+            for (int i = 0; i < numSamples; ++i)
+                inputCaptureScratch[(size_t) i] *= inputCalibration.nextGain();
         monoSource = inputCaptureScratch.data();
     }
 
@@ -228,6 +244,10 @@ void SourceChain::processBlock(const float* const* inputData, int numInputChanne
             pushRawAudioFrame(scratchPtr, numSamples);
         }
     }
+
+    // Calibration has already fed the detector, meter and tuner exactly once.
+    // Changing an amp/preset's input drive must not change their signal level.
+    if (calibrated) buffer.applyGain(toneDrive);
 
     // Process through signal chain (VSTs, NAM, IR)
     const bool hasProcessors = signalChain.getNumSlots() > 0;

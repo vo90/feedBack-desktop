@@ -658,6 +658,18 @@ export function initAudioBridge(): void {
         audio?.setGain(which, value);
     });
 
+    ipcMain.handle('audio:setInputCalibrationGain', (_event, gain: number) => {
+        if (typeof gain !== 'number' || !Number.isFinite(gain) || gain < 0.1 || gain > 5) return false;
+        try { return audio?.setInputCalibrationGain?.(gain) === true; }
+        catch { return false; }
+    });
+    ipcMain.handle('audio:getInputCalibrationGain', () => {
+        try {
+            const gain = audio?.getInputCalibrationGain?.();
+            return typeof gain === 'number' && Number.isFinite(gain) && gain >= 0.1 && gain <= 5 ? gain : 1;
+        } catch { return 1; }
+    });
+
     ipcMain.handle('audio:setInputChannel', (_event, channel: number) => {
         audio?.setInputChannel(channel);
     });
