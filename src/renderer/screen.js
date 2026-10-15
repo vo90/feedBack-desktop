@@ -1113,11 +1113,15 @@ function createDesktopAmpSimGuard(native, snapshot) {
                     await api.startAudio();
                     audioRunning = true;
                     toggleBtn.textContent = 'Stop';
-                    await window.feedBack?.guitarProfiles?.refresh();
-                    statusDot.className = 'w-3 h-3 rounded-full bg-emerald-500';
+                    let guitarGainError = '';
+                    try { await window.feedBack?.guitarProfiles?.refresh(); }
+                    catch (error) { guitarGainError = error?.message || 'Guitar gain could not be applied'; }
+                    statusDot.className = guitarGainError
+                        ? 'w-3 h-3 rounded-full bg-red-500'
+                        : 'w-3 h-3 rounded-full bg-emerald-500';
                     const modeLabel = (typeof result === 'object' && result?.duplex === false)
                         ? ' (split mode)' : '';
-                    statusText.textContent = 'Audio running' + modeLabel;
+                    statusText.textContent = guitarGainError || 'Audio running' + modeLabel;
                     aeApplyNoiseGateToEngine();
                     rememberAppliedDeviceSettings();
                     aeApplyTonePolishToEngine();

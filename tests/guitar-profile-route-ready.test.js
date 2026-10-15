@@ -56,3 +56,22 @@ test('live channel change recalls its guitar gain before saving the selected cha
     await change();
     assert.deepEqual(calls,[['channel',1],['gain'],['saved']]);
 });
+
+test('a failed startup gain refresh reports the error without aborting remaining panel initialization',async()=>{
+    let synchronized = false;
+    const scope = {inputChannelSelect:{value:'0'},audioRunning:false,toggleBtn:{},statusDot:{},statusText:{},result:{ok:true},
+        deviceTypeSelect:{value:'ASIO'},inputDeviceSelect:{value:'Interface'},
+        api:{setInputChannel:async()=>{},startAudio:async()=>{}},
+        window:{feedBack:{guitarProfiles:{refresh:async()=>{throw new Error('Temporary profile error');}}}},
+        aeApplyNoiseGateToEngine(){},rememberAppliedDeviceSettings(){},aeApplyTonePolishToEngine(){},
+        syncSelectedInputSource(){synchronized=true;}};
+    const init = source.indexOf('    async function init() {');
+    const start = source.indexOf('                    const inputChannel = parseInt(inputChannelSelect.value);',init);
+    const end = source.indexOf('\n                }',start);
+    await vm.runInNewContext('(async()=>{' + source.slice(start,end) + '})()',scope);
+    assert.equal(scope.audioRunning,true);
+    assert.equal(scope.toggleBtn.textContent,'Stop');
+    assert.equal(scope.statusText.textContent,'Temporary profile error');
+    assert.match(scope.statusDot.className,/red/);
+    assert.equal(synchronized,true);
+});
